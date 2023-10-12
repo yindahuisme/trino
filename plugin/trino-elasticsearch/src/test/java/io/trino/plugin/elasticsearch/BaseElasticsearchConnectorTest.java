@@ -16,7 +16,6 @@ package io.trino.plugin.elasticsearch;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.io.BaseEncoding;
 import com.google.common.net.HostAndPort;
 import io.trino.Session;
 import io.trino.spi.type.VarcharType;
@@ -81,7 +80,7 @@ public abstract class BaseElasticsearchConnectorTest
                 elasticsearch.getAddress(),
                 TpchTable.getTables(),
                 ImmutableMap.of(),
-                ImmutableMap.of("elasticsearch.legacy-pass-through-query.enabled", "true"),
+                ImmutableMap.of(),
                 3,
                 catalogName);
     }
@@ -96,37 +95,29 @@ public abstract class BaseElasticsearchConnectorTest
         client = null;
     }
 
-    @SuppressWarnings("DuplicateBranchesInSwitch")
     @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
-        switch (connectorBehavior) {
-            case SUPPORTS_LIMIT_PUSHDOWN:
-            case SUPPORTS_TOPN_PUSHDOWN:
-                return false;
-
-            case SUPPORTS_CREATE_SCHEMA:
-                return false;
-
-            case SUPPORTS_CREATE_TABLE:
-            case SUPPORTS_RENAME_TABLE:
-                return false;
-
-            case SUPPORTS_ADD_COLUMN:
-            case SUPPORTS_RENAME_COLUMN:
-            case SUPPORTS_SET_COLUMN_TYPE:
-                return false;
-
-            case SUPPORTS_COMMENT_ON_TABLE:
-            case SUPPORTS_COMMENT_ON_COLUMN:
-                return false;
-
-            case SUPPORTS_INSERT:
-                return false;
-
-            default:
-                return super.hasBehavior(connectorBehavior);
-        }
+        return switch (connectorBehavior) {
+            case SUPPORTS_ADD_COLUMN,
+                    SUPPORTS_COMMENT_ON_COLUMN,
+                    SUPPORTS_COMMENT_ON_TABLE,
+                    SUPPORTS_CREATE_MATERIALIZED_VIEW,
+                    SUPPORTS_CREATE_SCHEMA,
+                    SUPPORTS_CREATE_TABLE,
+                    SUPPORTS_CREATE_VIEW,
+                    SUPPORTS_DELETE,
+                    SUPPORTS_INSERT,
+                    SUPPORTS_LIMIT_PUSHDOWN,
+                    SUPPORTS_MERGE,
+                    SUPPORTS_RENAME_COLUMN,
+                    SUPPORTS_RENAME_TABLE,
+                    SUPPORTS_ROW_TYPE,
+                    SUPPORTS_SET_COLUMN_TYPE,
+                    SUPPORTS_TOPN_PUSHDOWN,
+                    SUPPORTS_UPDATE -> false;
+            default -> super.hasBehavior(connectorBehavior);
+        };
     }
 
     /**
@@ -141,13 +132,9 @@ public abstract class BaseElasticsearchConnectorTest
      * @return the amount of clauses to be used in large queries
      */
     @Override
-    protected Object[][] largeInValuesCountData()
+    protected List<Integer> largeInValuesCountData()
     {
-        return new Object[][] {
-                {200},
-                {500},
-                {1000}
-        };
+        return ImmutableList.of(200, 500, 1000);
     }
 
     @Test
@@ -1062,6 +1049,30 @@ public abstract class BaseElasticsearchConnectorTest
                 .put("text_column", "soome%text")
                 .buildOrThrow());
 
+        // Add another document to make sure utf8 character sequence length is right
+        index(indexName, ImmutableMap.<String, Object>builder()
+                .put("keyword_column", "中文")
+                .put("text_column", "中文")
+                .buildOrThrow());
+
+        // Add another document to make sure utf8 character sequence length is right
+        index(indexName, ImmutableMap.<String, Object>builder()
+                .put("keyword_column", "こんにちは")
+                .put("text_column", "こんにちは")
+                .buildOrThrow());
+
+        // Add another document to make sure utf8 character sequence length is right
+        index(indexName, ImmutableMap.<String, Object>builder()
+                .put("keyword_column", "안녕하세요")
+                .put("text_column", "안녕하세요")
+                .buildOrThrow());
+
+        // Add another document to make sure utf8 character sequence length is right
+        index(indexName, ImmutableMap.<String, Object>builder()
+                .put("keyword_column", "Привет")
+                .put("text_column", "Привет")
+                .buildOrThrow());
+
         assertThat(query("" +
                 "SELECT " +
                 "keyword_column " +
@@ -1083,6 +1094,38 @@ public abstract class BaseElasticsearchConnectorTest
                 "FROM " + indexName + " " +
                 "WHERE keyword_column LIKE 'soome$%%' ESCAPE '$'"))
                 .matches("VALUES VARCHAR 'soome%text'")
+                .isFullyPushedDown();
+
+        assertThat(query("" +
+                "SELECT " +
+                "text_column " +
+                "FROM " + indexName + " " +
+                "WHERE keyword_column LIKE '中%'"))
+                .matches("VALUES VARCHAR '中文'")
+                .isFullyPushedDown();
+
+        assertThat(query("" +
+                "SELECT " +
+                "text_column " +
+                "FROM " + indexName + " " +
+                "WHERE keyword_column LIKE 'こんに%'"))
+                .matches("VALUES VARCHAR 'こんにちは'")
+                .isFullyPushedDown();
+
+        assertThat(query("" +
+                "SELECT " +
+                "text_column " +
+                "FROM " + indexName + " " +
+                "WHERE keyword_column LIKE '안녕하%'"))
+                .matches("VALUES VARCHAR '안녕하세요'")
+                .isFullyPushedDown();
+
+        assertThat(query("" +
+                "SELECT " +
+                "text_column " +
+                "FROM " + indexName + " " +
+                "WHERE keyword_column LIKE 'При%'"))
+                .matches("VALUES VARCHAR 'Привет'")
                 .isFullyPushedDown();
     }
 
@@ -1741,49 +1784,6 @@ public abstract class BaseElasticsearchConnectorTest
     }
 
     @Test
-    public void testPassthroughQuery()
-    {
-        @Language("JSON")
-        String query = "{\n" +
-                "    \"size\": 0,\n" +
-                "    \"aggs\" : {\n" +
-                "        \"max_orderkey\" : { \"max\" : { \"field\" : \"orderkey\" } },\n" +
-                "        \"sum_orderkey\" : { \"sum\" : { \"field\" : \"orderkey\" } }\n" +
-                "    }\n" +
-                "}";
-
-        assertQuery(
-                format("WITH data(r) AS (" +
-                        "   SELECT CAST(json_parse(result) AS ROW(aggregations ROW(max_orderkey ROW(value BIGINT), sum_orderkey ROW(value BIGINT)))) " +
-                        "   FROM \"orders$query:%s\") " +
-                        "SELECT r.aggregations.max_orderkey.value, r.aggregations.sum_orderkey.value " +
-                        "FROM data", BaseEncoding.base32().encode(query.getBytes(UTF_8))),
-                "VALUES (60000, 449872500)");
-
-        // assert that query pass-through returns the same result as the raw_query table function
-        assertThat(query(format("WITH data(r) AS (" +
-                "   SELECT CAST(json_parse(result) AS ROW(aggregations ROW(max_orderkey ROW(value BIGINT), sum_orderkey ROW(value BIGINT)))) " +
-                "   FROM \"orders$query:%s\") " +
-                "SELECT r.aggregations.max_orderkey.value, r.aggregations.sum_orderkey.value " +
-                "FROM data", BaseEncoding.base32().encode(query.getBytes(UTF_8)))))
-                .matches(format("WITH data(r) AS (" +
-                        "   SELECT CAST(json_parse(result) AS ROW(aggregations ROW(max_orderkey ROW(value BIGINT), sum_orderkey ROW(value BIGINT)))) " +
-                        format("   FROM TABLE(%s.system.raw_query(", catalogName) +
-                        "                        schema => 'tpch', " +
-                        "                        index => 'orders', " +
-                        "                        query => '%s'))) " +
-                        "SELECT r.aggregations.max_orderkey.value, r.aggregations.sum_orderkey.value " +
-                        "FROM data", query));
-
-        assertQueryFails(
-                "SELECT * FROM \"orders$query:invalid-base32-encoding\"",
-                "Elasticsearch query for 'orders' is not base32-encoded correctly");
-        assertQueryFails(
-                format("SELECT * FROM \"orders$query:%s\"", BaseEncoding.base32().encode("invalid json".getBytes(UTF_8))),
-                "Elasticsearch query for 'orders' is not valid JSON");
-    }
-
-    @Test
     public void testEmptyIndexWithMappings()
             throws IOException
     {
@@ -1861,6 +1861,27 @@ public abstract class BaseElasticsearchConnectorTest
                         "index => 'nation', " +
                         "query => '{\"query\": {\"range\": {\"nationkey\": {\"gte\": 0,\"lte\": 3}}}}')) t(result)",
                 "VALUES ARRAY['ALGERIA', 'ARGENTINA', 'BRAZIL', 'CANADA']");
+
+        // use aggregations
+        @Language("JSON")
+        String query = "{\n" +
+                "    \"size\": 0,\n" +
+                "    \"aggs\" : {\n" +
+                "        \"max_orderkey\" : { \"max\" : { \"field\" : \"orderkey\" } },\n" +
+                "        \"sum_orderkey\" : { \"sum\" : { \"field\" : \"orderkey\" } }\n" +
+                "    }\n" +
+                "}";
+
+        assertQuery(
+                format("WITH data(r) AS (" +
+                        "   SELECT CAST(json_parse(result) AS ROW(aggregations ROW(max_orderkey ROW(value BIGINT), sum_orderkey ROW(value BIGINT)))) " +
+                        "   FROM TABLE(%s.system.raw_query(" +
+                        "                        schema => 'tpch', " +
+                        "                        index => 'orders', " +
+                        "                        query => '%s'))) " +
+                        "SELECT r.aggregations.max_orderkey.value, r.aggregations.sum_orderkey.value " +
+                        "FROM data", catalogName, query),
+                "VALUES (60000, 449872500)");
 
         // no matches
         assertQuery("SELECT json_query(result, 'lax $[0][0].hits.hits') " +

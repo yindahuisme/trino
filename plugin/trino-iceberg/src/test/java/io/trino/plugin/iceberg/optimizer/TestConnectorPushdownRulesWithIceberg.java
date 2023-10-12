@@ -18,12 +18,14 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.Session;
 import io.trino.cost.ScalarStatsCalculator;
+import io.trino.metadata.InternalFunctionBundle;
 import io.trino.metadata.TableHandle;
 import io.trino.plugin.hive.HiveTransactionHandle;
 import io.trino.plugin.hive.metastore.Database;
 import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.plugin.iceberg.ColumnIdentity;
 import io.trino.plugin.iceberg.IcebergColumnHandle;
+import io.trino.plugin.iceberg.IcebergPlugin;
 import io.trino.plugin.iceberg.IcebergTableHandle;
 import io.trino.plugin.iceberg.TestingIcebergConnectorFactory;
 import io.trino.plugin.iceberg.catalog.file.TestingIcebergFileMetastoreCatalogModule;
@@ -47,23 +49,23 @@ import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.SubscriptExpression;
 import io.trino.sql.tree.SymbolReference;
 import io.trino.testing.LocalQueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static com.google.inject.util.Modules.EMPTY_MODULE;
-import static io.trino.plugin.hive.metastore.file.FileHiveMetastore.createTestingFileHiveMetastore;
+import static io.trino.plugin.hive.metastore.file.TestingFileHiveMetastore.createTestingFileHiveMetastore;
 import static io.trino.plugin.iceberg.ColumnIdentity.TypeCategory.STRUCT;
 import static io.trino.plugin.iceberg.ColumnIdentity.primitiveColumnIdentity;
 import static io.trino.plugin.iceberg.TableType.DATA;
-import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RowType.field;
@@ -116,6 +118,10 @@ public class TestConnectorPushdownRulesWithIceberg
         HiveMetastore metastore = createTestingFileHiveMetastore(baseDir);
         LocalQueryRunner queryRunner = LocalQueryRunner.create(ICEBERG_SESSION);
 
+        InternalFunctionBundle.InternalFunctionBundleBuilder functions = InternalFunctionBundle.builder();
+        new IcebergPlugin().getFunctions().forEach(functions::functions);
+        queryRunner.addFunctions(functions.build());
+
         queryRunner.createCatalog(
                 TEST_CATALOG_NAME,
                 new TestingIcebergConnectorFactory(Optional.of(new TestingIcebergFileMetastoreCatalogModule(metastore)), Optional.empty(), EMPTY_MODULE),
@@ -148,22 +154,21 @@ public class TestConnectorPushdownRulesWithIceberg
                 Optional.empty());
 
         IcebergTableHandle icebergTable = new IcebergTableHandle(
+                CatalogHandle.fromId("iceberg:NORMAL:v12345"),
                 SCHEMA_NAME,
                 tableName,
                 DATA,
                 Optional.of(1L),
                 "",
-                ImmutableList.of(),
                 Optional.of(""),
                 1,
                 TupleDomain.all(),
                 TupleDomain.all(),
+                OptionalLong.empty(),
                 ImmutableSet.of(),
                 Optional.empty(),
                 "",
                 ImmutableMap.of(),
-                NO_RETRIES,
-                ImmutableList.of(),
                 false,
                 Optional.empty());
         TableHandle table = new TableHandle(catalogHandle, icebergTable, new HiveTransactionHandle(false));
@@ -231,22 +236,21 @@ public class TestConnectorPushdownRulesWithIceberg
         PushPredicateIntoTableScan pushPredicateIntoTableScan = new PushPredicateIntoTableScan(tester().getPlannerContext(), tester().getTypeAnalyzer(), false);
 
         IcebergTableHandle icebergTable = new IcebergTableHandle(
+                CatalogHandle.fromId("iceberg:NORMAL:v12345"),
                 SCHEMA_NAME,
                 tableName,
                 DATA,
                 Optional.of(snapshotId),
                 "",
-                ImmutableList.of(),
                 Optional.of(""),
                 1,
                 TupleDomain.all(),
                 TupleDomain.all(),
+                OptionalLong.empty(),
                 ImmutableSet.of(),
                 Optional.empty(),
                 "",
                 ImmutableMap.of(),
-                NO_RETRIES,
-                ImmutableList.of(),
                 false,
                 Optional.empty());
         TableHandle table = new TableHandle(catalogHandle, icebergTable, new HiveTransactionHandle(false));
@@ -281,22 +285,21 @@ public class TestConnectorPushdownRulesWithIceberg
         PruneTableScanColumns pruneTableScanColumns = new PruneTableScanColumns(tester().getMetadata());
 
         IcebergTableHandle icebergTable = new IcebergTableHandle(
+                CatalogHandle.fromId("iceberg:NORMAL:v12345"),
                 SCHEMA_NAME,
                 tableName,
                 DATA,
                 Optional.empty(),
                 "",
-                ImmutableList.of(),
                 Optional.of(""),
                 1,
                 TupleDomain.all(),
                 TupleDomain.all(),
+                OptionalLong.empty(),
                 ImmutableSet.of(),
                 Optional.empty(),
                 "",
                 ImmutableMap.of(),
-                NO_RETRIES,
-                ImmutableList.of(),
                 false,
                 Optional.empty());
         TableHandle table = new TableHandle(catalogHandle, icebergTable, new HiveTransactionHandle(false));
@@ -342,22 +345,21 @@ public class TestConnectorPushdownRulesWithIceberg
                 new ScalarStatsCalculator(tester().getPlannerContext(), tester().getTypeAnalyzer()));
 
         IcebergTableHandle icebergTable = new IcebergTableHandle(
+                CatalogHandle.fromId("iceberg:NORMAL:v12345"),
                 SCHEMA_NAME,
                 tableName,
                 DATA,
                 Optional.of(1L),
                 "",
-                ImmutableList.of(),
                 Optional.of(""),
                 1,
                 TupleDomain.all(),
                 TupleDomain.all(),
+                OptionalLong.empty(),
                 ImmutableSet.of(),
                 Optional.empty(),
                 "",
                 ImmutableMap.of(),
-                NO_RETRIES,
-                ImmutableList.of(),
                 false,
                 Optional.empty());
         TableHandle table = new TableHandle(catalogHandle, icebergTable, new HiveTransactionHandle(false));
@@ -421,7 +423,7 @@ public class TestConnectorPushdownRulesWithIceberg
         metastore.dropTable(SCHEMA_NAME, tableName, true);
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void cleanup()
             throws IOException
     {

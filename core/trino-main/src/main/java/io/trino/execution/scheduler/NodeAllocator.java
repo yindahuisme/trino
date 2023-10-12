@@ -29,7 +29,7 @@ public interface NodeAllocator
      *
      * It is obligatory for the calling party to release all the leases they obtained via {@link NodeLease#release()}.
      */
-    NodeLease acquire(NodeRequirements nodeRequirements, DataSize memoryRequirement);
+    NodeLease acquire(NodeRequirements nodeRequirements, DataSize memoryRequirement, TaskExecutionClass executionClass);
 
     @Override
     void close();
@@ -39,6 +39,18 @@ public interface NodeAllocator
         ListenableFuture<InternalNode> getNode();
 
         default void attachTaskId(TaskId taskId) {}
+
+        /**
+         * Update execution class if it changes at runtime.
+         * It is only allowed to change execution class from speculative to non-speculative.
+         */
+        void setExecutionClass(TaskExecutionClass executionClass);
+
+        /**
+         * Update memory requirement for lease. There is no constraint when this method can be called - it
+         * can be done both before and after node lease is already fulfilled.
+         */
+        void setMemoryRequirement(DataSize memoryRequirement);
 
         void release();
     }

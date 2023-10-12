@@ -13,10 +13,8 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
-
-import javax.annotation.Nullable;
+import io.trino.spi.Experimental;
+import jakarta.annotation.Nullable;
 
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -228,8 +226,15 @@ public class IntArrayBlock
         return sb.toString();
     }
 
-    Slice getValuesSlice()
+    @Experimental(eta = "2023-12-31")
+    public int[] getRawValues()
     {
-        return Slices.wrappedIntArray(values, arrayOffset, positionCount);
+        return values;
+    }
+
+    @Experimental(eta = "2023-12-31")
+    public int getRawValuesOffset()
+    {
+        return arrayOffset;
     }
 }

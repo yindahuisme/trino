@@ -21,8 +21,9 @@ import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -34,10 +35,12 @@ import static com.google.inject.util.Modules.EMPTY_MODULE;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 /**
  * Tests querying views on a schema which has a mix of Hive and Delta Lake tables.
  */
+@TestInstance(PER_CLASS)
 public abstract class BaseDeltaLakeSharedMetastoreViewsTest
         extends AbstractTestQueryFramework
 {
@@ -45,7 +48,7 @@ public abstract class BaseDeltaLakeSharedMetastoreViewsTest
     protected static final String HIVE_CATALOG_NAME = "hive";
     protected static final String SCHEMA = "test_shared_schema_views_" + randomNameSuffix();
 
-    private String dataDirectory;
+    private Path dataDirectory;
     private HiveMetastore metastore;
 
     @Override
@@ -58,10 +61,10 @@ public abstract class BaseDeltaLakeSharedMetastoreViewsTest
                 .build();
         DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session).build();
 
-        this.dataDirectory = queryRunner.getCoordinator().getBaseDataDir().resolve("delta_lake_data").toString();
+        this.dataDirectory = queryRunner.getCoordinator().getBaseDataDir().resolve("delta_lake_data");
         this.metastore = createTestMetastore(dataDirectory);
 
-        queryRunner.installPlugin(new TestingDeltaLakePlugin(Optional.of(new TestingDeltaLakeMetastoreModule(metastore)), EMPTY_MODULE));
+        queryRunner.installPlugin(new TestingDeltaLakePlugin(Optional.of(new TestingDeltaLakeMetastoreModule(metastore)), Optional.empty(), EMPTY_MODULE));
         queryRunner.createCatalog(DELTA_CATALOG_NAME, "delta_lake");
 
         queryRunner.installPlugin(new TestingHivePlugin(metastore));
@@ -76,7 +79,7 @@ public abstract class BaseDeltaLakeSharedMetastoreViewsTest
         return queryRunner;
     }
 
-    protected abstract HiveMetastore createTestMetastore(String dataDirectory);
+    protected abstract HiveMetastore createTestMetastore(Path dataDirectory);
 
     @Test
     public void testViewWithLiteralColumnCreatedInDeltaLakeIsReadableInHive()
@@ -154,13 +157,13 @@ public abstract class BaseDeltaLakeSharedMetastoreViewsTest
         }
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void cleanup()
             throws IOException
     {
         if (metastore != null) {
             metastore.dropDatabase(SCHEMA, false);
-            deleteRecursively(Path.of(dataDirectory), ALLOW_INSECURE);
+            deleteRecursively(dataDirectory, ALLOW_INSECURE);
         }
     }
 }

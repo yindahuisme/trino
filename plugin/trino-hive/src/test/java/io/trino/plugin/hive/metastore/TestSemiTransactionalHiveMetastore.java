@@ -15,14 +15,14 @@ package io.trino.plugin.hive.metastore;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.filesystem.Location;
 import io.trino.plugin.hive.HiveBucketProperty;
 import io.trino.plugin.hive.HiveMetastoreClosure;
 import io.trino.plugin.hive.HiveType;
 import io.trino.plugin.hive.PartitionStatistics;
 import io.trino.plugin.hive.acid.AcidTransaction;
 import io.trino.plugin.hive.fs.FileSystemDirectoryLister;
-import org.apache.hadoop.fs.Path;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
@@ -44,7 +44,6 @@ import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.testng.Assert.assertTrue;
 
 // countDownLatch field is shared between tests
-@Test(singleThreaded = true)
 public class TestSemiTransactionalHiveMetastore
 {
     private static final Column TABLE_COLUMN = new Column(
@@ -53,7 +52,7 @@ public class TestSemiTransactionalHiveMetastore
             Optional.of("comment"));
     private static final Storage TABLE_STORAGE = new Storage(
             StorageFormat.create("serde", "input", "output"),
-            Optional.of("location"),
+            Optional.of("/test"),
             Optional.of(new HiveBucketProperty(ImmutableList.of("column"), BUCKETING_V1, 10, ImmutableList.of(new SortingColumn("column", SortingColumn.Order.ASCENDING)))),
             true,
             ImmutableMap.of("param", "value2"));
@@ -109,7 +108,7 @@ public class TestSemiTransactionalHiveMetastore
             IntStream.range(0, tablesToUpdate).forEach(i -> semiTransactionalHiveMetastore.finishChangingExistingTable(INSERT, SESSION,
                     "database",
                     "table_" + i,
-                    new Path("location"),
+                    Location.of(TABLE_STORAGE.getLocation()),
                     ImmutableList.of(),
                     PartitionStatistics.empty(),
                     false));

@@ -16,6 +16,7 @@ package io.trino.plugin.ml.type;
 import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
 import io.trino.spi.type.TypeSignature;
@@ -42,18 +43,6 @@ public class ModelType
     }
 
     @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            block.writeBytesTo(position, 0, block.getSliceLength(position), blockBuilder);
-            blockBuilder.closeEntry();
-        }
-    }
-
-    @Override
     public Slice getSlice(Block block, int position)
     {
         return block.getSlice(position, 0, block.getSliceLength(position));
@@ -68,7 +57,7 @@ public class ModelType
     @Override
     public void writeSlice(BlockBuilder blockBuilder, Slice value, int offset, int length)
     {
-        blockBuilder.writeBytes(value, offset, length).closeEntry();
+        ((VariableWidthBlockBuilder) blockBuilder).writeEntry(value, offset, length);
     }
 
     @Override

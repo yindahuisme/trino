@@ -18,7 +18,7 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedRow;
 import io.trino.testing.QueryRunner;
 import io.trino.tpch.TpchTable;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
@@ -113,7 +113,7 @@ public class TestIcebergPartitionEvolution
                 .filter(file -> ((String) file.getField(0)).contains("regionkey="))
                 .collect(toImmutableList());
 
-        expectedInitialFiles = toIntExact((long) computeActual("SELECT DISTINCT substring(name, 1, 1) FROM nation WHERE nationkey < 10").getRowCount());
+        expectedInitialFiles = computeActual("SELECT DISTINCT substring(name, 1, 1) FROM nation WHERE nationkey < 10").getRowCount();
         assertThat(initialFiles).hasSize(expectedInitialFiles);
         assertEquals(initialFiles.stream().mapToLong(row -> (long) row.getField(1)).sum(), 10L);
 

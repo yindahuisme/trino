@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.mysql;
 
+import io.trino.plugin.base.mapping.DefaultIdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.DefaultQueryBuilder;
@@ -22,7 +23,6 @@ import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
-import io.trino.plugin.jdbc.mapping.DefaultIdentifierMapping;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.expression.ConnectorExpression;
@@ -138,7 +138,13 @@ public class TestMySqlClient
         testImplementAggregation(
                 new AggregateFunction("sum", BIGINT, List.of(bigintVariable), List.of(), true, Optional.empty()),
                 Map.of(bigintVariable.getName(), BIGINT_COLUMN),
-                Optional.empty());  // distinct not supported
+                Optional.of("sum(DISTINCT `c_bigint`)"));
+
+        // sum(DISTINCT double)
+        testImplementAggregation(
+                new AggregateFunction("sum", DOUBLE, List.of(bigintVariable), List.of(), true, Optional.empty()),
+                Map.of(bigintVariable.getName(), DOUBLE_COLUMN),
+                Optional.of("sum(DISTINCT `c_double`)"));
 
         // sum(bigint) FILTER (WHERE ...)
         testImplementAggregation(

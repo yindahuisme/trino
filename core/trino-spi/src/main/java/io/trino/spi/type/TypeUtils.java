@@ -18,8 +18,7 @@ import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
-
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -59,6 +58,13 @@ public final class TypeUtils
             return type.getSlice(block, position);
         }
         return type.getObject(block, position);
+    }
+
+    public static Block writeNativeValue(Type type, @Nullable Object value)
+    {
+        BlockBuilder blockBuilder = type.createBlockBuilder(null, 1);
+        writeNativeValue(type, blockBuilder, value);
+        return blockBuilder.build();
     }
 
     /**

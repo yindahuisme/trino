@@ -13,28 +13,15 @@
  */
 package io.trino.plugin.iceberg;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Resources;
-import io.trino.filesystem.TrinoFileSystemFactory;
-import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
-import io.trino.hdfs.ConfigurationInitializer;
-import io.trino.hdfs.DynamicHdfsConfiguration;
-import io.trino.hdfs.HdfsConfig;
-import io.trino.hdfs.HdfsConfiguration;
-import io.trino.hdfs.HdfsConfigurationInitializer;
-import io.trino.hdfs.HdfsEnvironment;
-import io.trino.hdfs.authentication.NoHdfsAuthentication;
-import io.trino.plugin.hive.azure.HiveAzureConfig;
-import io.trino.plugin.hive.azure.TrinoAzureConfigurationInitializer;
+import io.trino.filesystem.Location;
 import io.trino.plugin.hive.containers.HiveHadoop;
 import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.plugin.hive.metastore.thrift.BridgingHiveMetastore;
 import io.trino.testing.QueryRunner;
-import io.trino.tpch.TpchTable;
+import org.junit.jupiter.api.Test;
 import org.testng.annotations.Parameters;
-import org.testng.annotations.Test;
 
 import java.nio.file.Path;
 import java.nio.file.attribute.FileAttribute;
@@ -46,7 +33,6 @@ import java.util.Set;
 import static io.trino.plugin.hive.TestingThriftHiveMetastoreBuilder.testingThriftHiveMetastoreBuilder;
 import static io.trino.plugin.iceberg.IcebergTestUtils.checkOrcFileSorting;
 import static io.trino.testing.TestingNames.randomNameSuffix;
-import static io.trino.tpch.TpchTable.LINE_ITEM;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Locale.ENGLISH;
@@ -64,7 +50,6 @@ public class TestIcebergAbfsConnectorSmokeTest
     private final String bucketName;
 
     private HiveHadoop hiveHadoop;
-    private TrinoFileSystemFactory fileSystemFactory;
 
     @Parameters({
             "hive.hadoop2.azure-abfs-container",
@@ -99,14 +84,6 @@ public class TestIcebergAbfsConnectorSmokeTest
                 .build());
         this.hiveHadoop.start();
 
-        HiveAzureConfig azureConfig = new HiveAzureConfig()
-                .setAbfsStorageAccount(account)
-                .setAbfsAccessKey(accessKey);
-        ConfigurationInitializer azureConfigurationInitializer = new TrinoAzureConfigurationInitializer(azureConfig);
-        HdfsConfigurationInitializer initializer = new HdfsConfigurationInitializer(new HdfsConfig(), ImmutableSet.of(azureConfigurationInitializer));
-        HdfsConfiguration hdfsConfiguration = new DynamicHdfsConfiguration(initializer, ImmutableSet.of());
-        this.fileSystemFactory = new HdfsFileSystemFactory(new HdfsEnvironment(hdfsConfiguration, new HdfsConfig(), new NoHdfsAuthentication()));
-
         return IcebergQueryRunner.builder()
                 .setIcebergProperties(
                         ImmutableMap.<String, String>builder()
@@ -122,10 +99,7 @@ public class TestIcebergAbfsConnectorSmokeTest
                 .setSchemaInitializer(
                         SchemaInitializer.builder()
                                 .withSchemaName(schemaName)
-                                .withClonedTpchTables(ImmutableList.<TpchTable<?>>builder()
-                                        .addAll(REQUIRED_TPCH_TABLES)
-                                        .add(LINE_ITEM)
-                                        .build())
+                                .withClonedTpchTables(REQUIRED_TPCH_TABLES)
                                 .withSchemaProperties(Map.of("location", "'" + formatAbfsUrl(container, account, bucketName) + schemaName + "'"))
                                 .build())
                 .build();
@@ -188,9 +162,9 @@ public class TestIcebergAbfsConnectorSmokeTest
     }
 
     @Override
-    protected boolean isFileSorted(String path, String sortColumnName)
+    protected boolean isFileSorted(Location path, String sortColumnName)
     {
-        return checkOrcFileSorting(fileSystemFactory, path, sortColumnName);
+        return checkOrcFileSorting(fileSystem, path, sortColumnName);
     }
 
     private static String formatAbfsUrl(String container, String account, String bucketName)

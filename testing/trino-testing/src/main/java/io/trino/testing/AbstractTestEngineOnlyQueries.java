@@ -23,6 +23,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.google.common.collect.Ordering;
+import io.opentelemetry.api.trace.Span;
 import io.trino.Session;
 import io.trino.SystemSessionProperties;
 import io.trino.spi.session.PropertyMetadata;
@@ -32,10 +33,9 @@ import io.trino.tpch.TpchTable;
 import io.trino.type.SqlIntervalDayTime;
 import io.trino.type.SqlIntervalYearMonth;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -60,15 +60,12 @@ import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
 import static io.trino.SystemSessionProperties.LATE_MATERIALIZATION;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.DecimalType.createDecimalType;
-import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.BROADCAST;
 import static io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy.NONE;
 import static io.trino.sql.tree.ExplainType.Type.DISTRIBUTED;
 import static io.trino.sql.tree.ExplainType.Type.IO;
 import static io.trino.sql.tree.ExplainType.Type.LOGICAL;
-import static io.trino.testing.DataProviders.toDataProvider;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.QueryAssertions.assertContains;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
@@ -855,17 +852,11 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT CAST(1 AS decimal(3,2)) <> ANY(SELECT CAST(1 AS decimal(3,1)))");
     }
 
-    @Test(dataProvider = "quantified_comparisons_corner_cases")
-    public void testQuantifiedComparisonCornerCases(String query)
-    {
-        assertQuery(query);
-    }
-
-    @DataProvider(name = "quantified_comparisons_corner_cases")
-    public Object[][] qualifiedComparisonsCornerCases()
+    @Test
+    public void testQuantifiedComparisonCornerCases()
     {
         //the %subquery% is wrapped in a SELECT so that H2 does not blow up on the VALUES subquery
-        return queryTemplate("SELECT %value% %operator% %quantifier% (SELECT * FROM (%subquery%))")
+        queryTemplate("SELECT %value% %operator% %quantifier% (SELECT * FROM (%subquery%))")
                 .replaceAll(
                         parameter("subquery").of(
                                 "SELECT 1 WHERE false",
@@ -874,7 +865,7 @@ public abstract class AbstractTestEngineOnlyQueries
                         parameter("quantifier").of("ALL", "ANY"),
                         parameter("value").of("1", "NULL"),
                         parameter("operator").of("=", "!=", "<", ">", "<=", ">="))
-                .collect(toDataProvider());
+                .forEach(this::assertQuery);
     }
 
     @Test
@@ -920,28 +911,6 @@ public abstract class AbstractTestEngineOnlyQueries
     {
         assertQuery("SELECT TRY(CAST('a' AS BIGINT))",
                 "SELECT NULL");
-    }
-
-    @Test
-    public void testDefaultDecimalLiteralSwitch()
-    {
-        Session decimalLiteral = Session.builder(getSession())
-                .setSystemProperty(SystemSessionProperties.PARSE_DECIMAL_LITERALS_AS_DOUBLE, "false")
-                .build();
-        MaterializedResult decimalColumnResult = computeActual(decimalLiteral, "SELECT 1.0");
-
-        assertEquals(decimalColumnResult.getRowCount(), 1);
-        assertEquals(decimalColumnResult.getTypes().get(0), createDecimalType(2, 1));
-        assertEquals(decimalColumnResult.getMaterializedRows().get(0).getField(0), new BigDecimal("1.0"));
-
-        Session doubleLiteral = Session.builder(getSession())
-                .setSystemProperty(SystemSessionProperties.PARSE_DECIMAL_LITERALS_AS_DOUBLE, "true")
-                .build();
-        MaterializedResult doubleColumnResult = computeActual(doubleLiteral, "SELECT 1.0");
-
-        assertEquals(doubleColumnResult.getRowCount(), 1);
-        assertEquals(doubleColumnResult.getTypes().get(0), DOUBLE);
-        assertEquals(doubleColumnResult.getMaterializedRows().get(0).getField(0), 1.0);
     }
 
     @Test
@@ -1601,6 +1570,23 @@ public abstract class AbstractTestEngineOnlyQueries
                             .build();
                     assertQuery(session, "EXECUTE my_query USING 2", "SELECT true");
                 });
+    }
+
+    @Test
+    public void testExecuteImmediateWithSubqueries()
+    {
+        List<QueryTemplate.Parameter> leftValues = parameter("left").of(
+                "", "1 = ",
+                "EXISTS",
+                "1 IN",
+                "1 = ANY", "1 = ALL",
+                "2 <> ANY", "2 <> ALL",
+                "0 < ALL", "0 < ANY",
+                "1 <= ALL", "1 <= ANY");
+
+        queryTemplate("SELECT %left% (SELECT 1 WHERE 2 = ?)")
+                .replaceAll(leftValues)
+                .forEach(query -> assertQuery("EXECUTE IMMEDIATE '" + query + "' USING 2", "SELECT true"));
     }
 
     @Test
@@ -5332,9 +5318,11 @@ public abstract class AbstractTestEngineOnlyQueries
     {
         Session session = new Session(
                 getSession().getQueryId(),
+                Span.getInvalid(),
                 Optional.empty(),
                 getSession().isClientTransactionSupport(),
                 getSession().getIdentity(),
+                getSession().getOriginalIdentity(),
                 getSession().getSource(),
                 getSession().getCatalog(),
                 getSession().getSchema(),
@@ -5508,7 +5496,7 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT apply(5 + RANDOM(1), x -> x + TRY(1 / 0))", "SELECT NULL");
 
         // test try with invalid JSON
-        assertQueryFails("SELECT JSON_FORMAT(TRY(JSON 'INVALID'))", "line 1:24: 'INVALID' is not a valid json literal");
+        assertQueryFails("SELECT JSON_FORMAT(TRY(JSON 'INVALID'))", "line 1:24: 'INVALID' is not a valid JSON literal");
         assertQuery("SELECT JSON_FORMAT(TRY (JSON_PARSE('INVALID')))", "SELECT NULL");
 
         // tests that might be constant folded
@@ -5523,7 +5511,7 @@ public abstract class AbstractTestEngineOnlyQueries
         assertQuery("SELECT COALESCE(TRY(CAST(CONCAT('a', CAST(123 AS VARCHAR)) AS BIGINT)), 0)", "SELECT 0L");
         assertQuery("SELECT 123 + TRY(ABS(-9223372036854775807 - 1))", "SELECT NULL");
         assertQuery("SELECT JSON_FORMAT(TRY(JSON '[]')) || '123'", "SELECT '[]123'");
-        assertQueryFails("SELECT JSON_FORMAT(TRY(JSON 'INVALID')) || '123'", "line 1:24: 'INVALID' is not a valid json literal");
+        assertQueryFails("SELECT JSON_FORMAT(TRY(JSON 'INVALID')) || '123'", "line 1:24: 'INVALID' is not a valid JSON literal");
         assertQuery("SELECT TRY(2/1)", "SELECT 2");
         assertQuery("SELECT TRY(2/0)", "SELECT null");
         assertQuery("SELECT COALESCE(TRY(2/0), 0)", "SELECT 0");
@@ -6241,7 +6229,8 @@ public abstract class AbstractTestEngineOnlyQueries
         return format("SELECT * FROM (SELECT %s FROM region LIMIT 1) a(%s) INNER JOIN unnest(ARRAY[%s], ARRAY[%2$s]) b(b1, b2) ON true", fields, columns, literals);
     }
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testLateMaterializationOuterJoin()
     {
         Session session = Session.builder(getSession())
@@ -6594,6 +6583,34 @@ public abstract class AbstractTestEngineOnlyQueries
         assertThat(query("SELECT json_array(name, regionkey RETURNING varchar(100) FORMAT JSON) result " +
                 "              FROM region"))
                 .matches("VALUES (CAST('[\"AFRICA\",0]' AS varchar(100))), ('[\"AMERICA\",1]'), ('[\"ASIA\",2]'), ('[\"EUROPE\",3]'), ('[\"MIDDLE EAST\",4]')");
+    }
+
+    @Test
+    public void testColumnNames()
+    {
+        MaterializedResult showFunctionsResult = computeActual("SHOW FUNCTIONS");
+        assertEquals(showFunctionsResult.getColumnNames(), ImmutableList.of("Function", "Return Type", "Argument Types", "Function Type", "Deterministic", "Description"));
+
+        MaterializedResult showCatalogsResult = computeActual("SHOW CATALOGS");
+        assertEquals(showCatalogsResult.getColumnNames(), ImmutableList.of("Catalog"));
+
+        MaterializedResult selectAllResult = computeActual("SELECT * FROM nation");
+        assertEquals(selectAllResult.getColumnNames(), ImmutableList.of("nationkey", "name", "regionkey", "comment"));
+
+        MaterializedResult selectResult = computeActual("SELECT nationkey, regionkey FROM nation");
+        assertEquals(selectResult.getColumnNames(), ImmutableList.of("nationkey", "regionkey"));
+
+        MaterializedResult selectJsonArrayResult = computeActual("SELECT json_array(name, regionkey) from nation");
+        assertEquals(selectJsonArrayResult.getColumnNames(), ImmutableList.of("_col0"));
+
+        MaterializedResult selectJsonArrayAsResult = computeActual("SELECT json_array(name, regionkey) result from nation");
+        assertEquals(selectJsonArrayAsResult.getColumnNames(), ImmutableList.of("result"));
+
+        MaterializedResult showColumnResult = computeActual("SHOW COLUMNS FROM nation");
+        assertEquals(showColumnResult.getColumnNames(), ImmutableList.of("Column", "Type", "Extra", "Comment"));
+
+        MaterializedResult showCreateTableResult = computeActual("SHOW CREATE TABLE nation");
+        assertEquals(showCreateTableResult.getColumnNames(), ImmutableList.of("Create Table"));
     }
 
     private static ZonedDateTime zonedDateTime(String value)

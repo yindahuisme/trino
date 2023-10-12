@@ -17,11 +17,13 @@ import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.stats.CounterStat;
 import io.airlift.stats.TestingGcMonitor;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.opentelemetry.api.trace.Span;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.buffer.BufferResult;
 import io.trino.execution.buffer.BufferState;
@@ -29,6 +31,7 @@ import io.trino.execution.buffer.OutputBuffers;
 import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.execution.buffer.PipelinedOutputBuffers.OutputBufferId;
 import io.trino.execution.executor.TaskExecutor;
+import io.trino.execution.executor.timesharing.TimeSharingTaskExecutor;
 import io.trino.memory.MemoryPool;
 import io.trino.memory.QueryContext;
 import io.trino.operator.TaskContext;
@@ -36,9 +39,11 @@ import io.trino.spi.QueryId;
 import io.trino.spi.predicate.Domain;
 import io.trino.spiller.SpillSpaceTracker;
 import io.trino.sql.planner.LocalExecutionPlanner;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
 
 import java.net.URI;
 import java.util.Optional;
@@ -47,6 +52,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.airlift.concurrent.Threads.threadsNamed;
+import static io.airlift.tracing.Tracing.noopTracer;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.SessionTestUtils.TEST_SESSION;
@@ -72,13 +78,14 @@ import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
 public class TestSqlTask
 {
     public static final OutputBufferId OUT = new OutputBufferId(0);
@@ -90,10 +97,10 @@ public class TestSqlTask
 
     private final AtomicInteger nextTaskId = new AtomicInteger();
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
-        taskExecutor = new TaskExecutor(8, 16, 3, 4, Ticker.systemTicker());
+        taskExecutor = new TimeSharingTaskExecutor(8, 16, 3, 4, Ticker.systemTicker());
         taskExecutor.start();
 
         taskNotificationExecutor = newScheduledThreadPool(10, threadsNamed("task-notification-%s"));
@@ -106,10 +113,11 @@ public class TestSqlTask
                 taskExecutor,
                 planner,
                 createTestSplitMonitor(),
+                noopTracer(),
                 new TaskManagerConfig());
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void destroy()
     {
         taskExecutor.stop();
@@ -119,18 +127,21 @@ public class TestSqlTask
         sqlTaskExecutionFactory = null;
     }
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testEmptyQuery()
             throws Exception
     {
         SqlTask sqlTask = createInitialTask();
 
         TaskInfo taskInfo = sqlTask.updateTask(TEST_SESSION,
+                Span.getInvalid(),
                 Optional.of(PLAN_FRAGMENT),
                 ImmutableList.of(),
                 PipelinedOutputBuffers.createInitial(PARTITIONED)
                         .withNoMoreBufferIds(),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                false);
         assertEquals(taskInfo.getTaskStatus().getState(), TaskState.RUNNING);
         assertEquals(taskInfo.getTaskStatus().getVersion(), STARTING_VERSION);
 
@@ -139,18 +150,21 @@ public class TestSqlTask
         assertEquals(taskInfo.getTaskStatus().getVersion(), STARTING_VERSION);
 
         taskInfo = sqlTask.updateTask(TEST_SESSION,
+                Span.getInvalid(),
                 Optional.of(PLAN_FRAGMENT),
                 ImmutableList.of(new SplitAssignment(TABLE_SCAN_NODE_ID, ImmutableSet.of(), true)),
                 PipelinedOutputBuffers.createInitial(PARTITIONED)
                         .withNoMoreBufferIds(),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                false);
         assertEquals(taskInfo.getTaskStatus().getState(), TaskState.FINISHED);
 
         taskInfo = sqlTask.getTaskInfo(STARTING_VERSION).get();
         assertEquals(taskInfo.getTaskStatus().getState(), TaskState.FINISHED);
     }
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testSimpleQuery()
             throws Exception
     {
@@ -159,10 +173,12 @@ public class TestSqlTask
         assertEquals(sqlTask.getTaskStatus().getState(), TaskState.RUNNING);
         assertEquals(sqlTask.getTaskStatus().getVersion(), STARTING_VERSION);
         sqlTask.updateTask(TEST_SESSION,
+                Span.getInvalid(),
                 Optional.of(PLAN_FRAGMENT),
                 ImmutableList.of(new SplitAssignment(TABLE_SCAN_NODE_ID, ImmutableSet.of(SPLIT), true)),
                 PipelinedOutputBuffers.createInitial(PARTITIONED).withBuffer(OUT, 0).withNoMoreBufferIds(),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                false);
 
         TaskInfo taskInfo = sqlTask.getTaskInfo(STARTING_VERSION).get();
         assertEquals(taskInfo.getTaskStatus().getState(), TaskState.FLUSHING);
@@ -201,12 +217,14 @@ public class TestSqlTask
         SqlTask sqlTask = createInitialTask();
 
         TaskInfo taskInfo = sqlTask.updateTask(TEST_SESSION,
+                Span.getInvalid(),
                 Optional.of(PLAN_FRAGMENT),
                 ImmutableList.of(),
                 PipelinedOutputBuffers.createInitial(PARTITIONED)
                         .withBuffer(OUT, 0)
                         .withNoMoreBufferIds(),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                false);
         assertEquals(taskInfo.getTaskStatus().getState(), TaskState.RUNNING);
         assertNull(taskInfo.getStats().getEndTime());
 
@@ -215,7 +233,15 @@ public class TestSqlTask
         assertNull(taskInfo.getStats().getEndTime());
 
         taskInfo = sqlTask.cancel();
-        assertEquals(taskInfo.getTaskStatus().getState(), TaskState.CANCELED);
+        // This call can race and report either cancelling or cancelled
+        assertTrue(taskInfo.getTaskStatus().getState().isTerminatingOrDone());
+        // Task cancellation can race with output buffer state updates, but should transition to cancelled quickly
+        int attempts = 1;
+        while (!taskInfo.getTaskStatus().getState().isDone() && attempts < 3) {
+            taskInfo = Futures.getUnchecked(sqlTask.getTaskInfo(taskInfo.getTaskStatus().getVersion()));
+            attempts++;
+        }
+        assertEquals(taskInfo.getTaskStatus().getState(), TaskState.CANCELED, "Failed to see CANCELED after " + attempts + " attempts");
         assertNotNull(taskInfo.getStats().getEndTime());
 
         taskInfo = sqlTask.getTaskInfo();
@@ -223,7 +249,8 @@ public class TestSqlTask
         assertNotNull(taskInfo.getStats().getEndTime());
     }
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testAbort()
             throws Exception
     {
@@ -232,10 +259,12 @@ public class TestSqlTask
         assertEquals(sqlTask.getTaskStatus().getState(), TaskState.RUNNING);
         assertEquals(sqlTask.getTaskStatus().getVersion(), STARTING_VERSION);
         sqlTask.updateTask(TEST_SESSION,
+                Span.getInvalid(),
                 Optional.of(PLAN_FRAGMENT),
                 ImmutableList.of(new SplitAssignment(TABLE_SCAN_NODE_ID, ImmutableSet.of(SPLIT), true)),
                 PipelinedOutputBuffers.createInitial(PARTITIONED).withBuffer(OUT, 0).withNoMoreBufferIds(),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                false);
 
         TaskInfo taskInfo = sqlTask.getTaskInfo(STARTING_VERSION).get();
         assertEquals(taskInfo.getTaskStatus().getState(), TaskState.FLUSHING);
@@ -289,7 +318,7 @@ public class TestSqlTask
         assertFalse(bufferResult.isDone());
 
         sqlTask.cancel();
-        assertEquals(sqlTask.getTaskInfo().getTaskStatus().getState(), TaskState.CANCELED);
+        assertTrue(sqlTask.getTaskInfo().getTaskStatus().getState().isTerminatingOrDone());
 
         // buffer future will complete, the event is async so wait a bit for event to propagate
         bufferResult.get(1, SECONDS);
@@ -299,7 +328,8 @@ public class TestSqlTask
         assertTrue(bufferResult.get().isBufferComplete());
     }
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testBufferNotCloseOnFail()
             throws Exception
     {
@@ -312,6 +342,12 @@ public class TestSqlTask
 
         long taskStatusVersion = sqlTask.getTaskInfo().getTaskStatus().getVersion();
         sqlTask.failed(new Exception("test"));
+        // This call can race and return either FAILED or FAILING
+        TaskInfo taskInfo = sqlTask.getTaskInfo(taskStatusVersion).get();
+        assertTrue(taskInfo.getTaskStatus().getState().isTerminatingOrDone());
+
+        // This call should resolve to FAILED if the prior call did not
+        taskStatusVersion = taskInfo.getTaskStatus().getVersion();
         assertEquals(sqlTask.getTaskInfo(taskStatusVersion).get().getTaskStatus().getState(), TaskState.FAILED);
 
         // buffer will not be closed by fail event.  event is async so wait a bit for event to fire
@@ -321,19 +357,22 @@ public class TestSqlTask
         assertFalse(sqlTask.getTaskResults(OUT, 0, DataSize.of(1, MEGABYTE)).isDone());
     }
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testDynamicFilters()
             throws Exception
     {
         SqlTask sqlTask = createInitialTask();
         sqlTask.updateTask(
                 TEST_SESSION,
+                Span.getInvalid(),
                 Optional.of(PLAN_FRAGMENT_WITH_DYNAMIC_FILTER_SOURCE),
                 ImmutableList.of(new SplitAssignment(TABLE_SCAN_NODE_ID, ImmutableSet.of(SPLIT), false)),
                 PipelinedOutputBuffers.createInitial(PARTITIONED)
                         .withBuffer(OUT, 0)
                         .withNoMoreBufferIds(),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                false);
 
         assertEquals(sqlTask.getTaskStatus().getDynamicFiltersVersion(), INITIAL_DYNAMIC_FILTERS_VERSION);
 
@@ -349,7 +388,8 @@ public class TestSqlTask
         future.get();
     }
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testDynamicFilterFetchAfterTaskDone()
             throws Exception
     {
@@ -357,10 +397,12 @@ public class TestSqlTask
         OutputBuffers outputBuffers = PipelinedOutputBuffers.createInitial(PARTITIONED).withBuffer(OUT, 0).withNoMoreBufferIds();
         sqlTask.updateTask(
                 TEST_SESSION,
+                Span.getInvalid(),
                 Optional.of(PLAN_FRAGMENT_WITH_DYNAMIC_FILTER_SOURCE),
                 ImmutableList.of(new SplitAssignment(TABLE_SCAN_NODE_ID, ImmutableSet.of(), false)),
                 outputBuffers,
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                false);
 
         assertEquals(sqlTask.getTaskStatus().getDynamicFiltersVersion(), INITIAL_DYNAMIC_FILTERS_VERSION);
 
@@ -404,6 +446,7 @@ public class TestSqlTask
                 location,
                 "fake",
                 queryContext,
+                noopTracer(),
                 sqlTaskExecutionFactory,
                 taskNotificationExecutor,
                 sqlTask -> {},

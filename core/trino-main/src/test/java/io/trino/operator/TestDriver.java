@@ -36,9 +36,12 @@ import io.trino.split.PageSourceProvider;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.PageConsumerOperator;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.RepeatedTest;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -63,18 +66,19 @@ import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestDriver
 {
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
     private DriverContext driverContext;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
@@ -85,7 +89,7 @@ public class TestDriver
                 .addDriverContext();
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         executor.shutdownNow();
@@ -115,7 +119,8 @@ public class TestDriver
     }
 
     // The race can be reproduced somewhat reliably when the invocationCount is 10K, but we use 1K iterations to cap the test runtime.
-    @Test(invocationCount = 1_000, timeOut = 10_000)
+    @RepeatedTest(1000)
+    @Timeout(10)
     public void testConcurrentClose()
     {
         List<Type> types = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
@@ -129,7 +134,7 @@ public class TestDriver
         // let these threads race
         scheduledExecutor.submit(() -> driver.processForDuration(new Duration(1, TimeUnit.NANOSECONDS))); // don't want to call isFinishedInternal in processFor
         scheduledExecutor.submit(driver::close);
-        while (!driverContext.isDone()) {
+        while (!driverContext.isTerminatingOrDone()) {
             Uninterruptibles.sleepUninterruptibly(1, TimeUnit.MILLISECONDS);
         }
     }
@@ -210,6 +215,8 @@ public class TestDriver
         assertThatThrownBy(() -> driverProcessFor.get(1, TimeUnit.SECONDS))
                 .isInstanceOf(ExecutionException.class)
                 .hasCause(new TrinoException(GENERIC_INTERNAL_ERROR, "Driver was interrupted"));
+
+        assertTrue(driver.getDestroyedFuture().isDone());
     }
 
     @Test
@@ -230,10 +237,12 @@ public class TestDriver
 
         assertTrue(driver.processForDuration(new Duration(1, TimeUnit.MILLISECONDS)).isDone());
         assertTrue(driver.isFinished());
+        assertFalse(driver.getDestroyedFuture().isDone());
 
         brokenOperator.unlock();
 
         assertTrue(driverClose.get());
+        assertTrue(driver.getDestroyedFuture().isDone());
     }
 
     @Test
@@ -309,7 +318,7 @@ public class TestDriver
 
         driver.updateSplitAssignment(new SplitAssignment(sourceId, ImmutableSet.of(new ScheduledSplit(0, sourceId, newMockSplit())), true));
 
-        assertFalse(driver.isFinished());
+        assertFalse(driver.getDestroyedFuture().isDone());
         // processFor always returns NOT_BLOCKED, because DriveLockResult was not acquired
         assertTrue(driver.processForDuration(new Duration(1, TimeUnit.SECONDS)).isDone());
         assertFalse(driver.isFinished());
@@ -320,6 +329,8 @@ public class TestDriver
         assertThatThrownBy(() -> driverProcessFor.get(1, TimeUnit.SECONDS))
                 .isInstanceOf(ExecutionException.class)
                 .hasCause(new TrinoException(GENERIC_INTERNAL_ERROR, "Driver was interrupted"));
+
+        assertTrue(driver.getDestroyedFuture().isDone());
     }
 
     private static Split newMockSplit()

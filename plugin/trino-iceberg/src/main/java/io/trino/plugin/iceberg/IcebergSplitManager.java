@@ -14,9 +14,12 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.airlift.units.Duration;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitSource;
+import io.trino.plugin.iceberg.functions.tablechanges.TableChangesFunctionHandle;
+import io.trino.plugin.iceberg.functions.tablechanges.TableChangesSplitSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
@@ -25,14 +28,15 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.type.TypeManager;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
 
-import javax.inject.Inject;
-
+import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.getDynamicFilteringWaitTimeout;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.getMinimumAssignedSplitWeight;
+import static io.trino.spi.connector.FixedSplitSource.emptySplitSource;
 import static java.util.Objects.requireNonNull;
 
 public class IcebergSplitManager
@@ -43,13 +47,19 @@ public class IcebergSplitManager
     private final IcebergTransactionManager transactionManager;
     private final TypeManager typeManager;
     private final TrinoFileSystemFactory fileSystemFactory;
+    private final boolean asyncIcebergSplitProducer;
 
     @Inject
-    public IcebergSplitManager(IcebergTransactionManager transactionManager, TypeManager typeManager, TrinoFileSystemFactory fileSystemFactory)
+    public IcebergSplitManager(
+            IcebergTransactionManager transactionManager,
+            TypeManager typeManager,
+            TrinoFileSystemFactory fileSystemFactory,
+            @AsyncIcebergSplitProducer boolean asyncIcebergSplitProducer)
     {
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.asyncIcebergSplitProducer = asyncIcebergSplitProducer;
     }
 
     @Override
@@ -66,7 +76,7 @@ public class IcebergSplitManager
             if (table.isRecordScannedFiles()) {
                 return new FixedSplitSource(ImmutableList.of(), ImmutableList.of());
             }
-            return new FixedSplitSource(ImmutableList.of());
+            return emptySplitSource();
         }
 
         Table icebergTable = transactionManager.get(transaction, session.getIdentity()).getIcebergTable(session, table.getSchemaTableName());
@@ -74,6 +84,9 @@ public class IcebergSplitManager
 
         TableScan tableScan = icebergTable.newScan()
                 .useSnapshot(table.getSnapshotId().get());
+        if (!asyncIcebergSplitProducer) {
+            tableScan = tableScan.planWith(newDirectExecutorService());
+        }
         IcebergSplitSource splitSource = new IcebergSplitSource(
                 fileSystemFactory,
                 session,
@@ -88,5 +101,25 @@ public class IcebergSplitManager
                 getMinimumAssignedSplitWeight(session));
 
         return new ClassLoaderSafeConnectorSplitSource(splitSource, IcebergSplitManager.class.getClassLoader());
+    }
+
+    @Override
+    public ConnectorSplitSource getSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorTableFunctionHandle function)
+    {
+        if (function instanceof TableChangesFunctionHandle functionHandle) {
+            Table icebergTable = transactionManager.get(transaction, session.getIdentity()).getIcebergTable(session, functionHandle.schemaTableName());
+
+            TableChangesSplitSource tableChangesSplitSource = new TableChangesSplitSource(
+                    icebergTable,
+                    icebergTable.newIncrementalChangelogScan()
+                            .fromSnapshotExclusive(functionHandle.startSnapshotId())
+                            .toSnapshot(functionHandle.endSnapshotId()));
+            return new ClassLoaderSafeConnectorSplitSource(tableChangesSplitSource, IcebergSplitManager.class.getClassLoader());
+        }
+
+        throw new IllegalStateException("Unknown table function: " + function);
     }
 }

@@ -21,6 +21,7 @@ import io.trino.operator.scalar.json.JsonInputConversionError;
 import io.trino.operator.scalar.json.JsonOutputConversionError;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
 import io.trino.spi.type.StandardTypes;
@@ -44,12 +45,6 @@ public class Json2016Type
     public Object getObjectValue(ConnectorSession session, Block block, int position)
     {
         return getObject(block, position);
-    }
-
-    @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -87,6 +82,6 @@ public class Json2016Type
             }
         }
         Slice bytes = utf8Slice(json);
-        blockBuilder.writeBytes(bytes, 0, bytes.length()).closeEntry();
+        ((VariableWidthBlockBuilder) blockBuilder).writeEntry(bytes);
     }
 }

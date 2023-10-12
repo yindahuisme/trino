@@ -19,6 +19,7 @@ import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
+import io.opentelemetry.api.OpenTelemetry;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
@@ -28,7 +29,7 @@ import io.trino.plugin.jdbc.MaxDomainCompactionThreshold;
 import io.trino.plugin.jdbc.RetryingConnectionFactory;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
 import io.trino.plugin.jdbc.ptf.Query;
-import io.trino.spi.ptf.ConnectorTableFunction;
+import io.trino.spi.function.table.ConnectorTableFunction;
 import oracle.jdbc.OracleConnection;
 import oracle.jdbc.OracleDriver;
 
@@ -57,7 +58,7 @@ public class OracleClientModule
     @Provides
     @Singleton
     @ForBaseJdbc
-    public static ConnectionFactory connectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OracleConfig oracleConfig)
+    public static ConnectionFactory connectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OracleConfig oracleConfig, OpenTelemetry openTelemetry)
             throws SQLException
     {
         Properties connectionProperties = new Properties();
@@ -71,13 +72,15 @@ public class OracleClientModule
                     credentialProvider,
                     oracleConfig.getConnectionPoolMinSize(),
                     oracleConfig.getConnectionPoolMaxSize(),
-                    oracleConfig.getInactiveConnectionTimeout());
+                    oracleConfig.getInactiveConnectionTimeout(),
+                    openTelemetry);
         }
 
         return new RetryingConnectionFactory(new DriverConnectionFactory(
                 new OracleDriver(),
                 config.getConnectionUrl(),
                 connectionProperties,
-                credentialProvider));
+                credentialProvider,
+                openTelemetry));
     }
 }

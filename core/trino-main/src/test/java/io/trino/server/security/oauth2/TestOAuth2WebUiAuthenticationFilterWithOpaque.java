@@ -21,8 +21,9 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 import java.io.IOException;
+import java.util.Map;
 
-import static javax.ws.rs.core.HttpHeaders.AUTHORIZATION;
+import static jakarta.ws.rs.core.HttpHeaders.AUTHORIZATION;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 import static org.assertj.core.api.InstanceOfAssertFactories.list;
@@ -31,7 +32,7 @@ public class TestOAuth2WebUiAuthenticationFilterWithOpaque
         extends BaseOAuth2WebUiAuthenticationFilterTest
 {
     @Override
-    protected ImmutableMap<String, String> getOAuth2Config(String idpUrl)
+    protected Map<String, String> getOAuth2Config(String idpUrl)
     {
         return ImmutableMap.<String, String>builder()
                 .put("web-ui.enabled", "true")
@@ -42,6 +43,7 @@ public class TestOAuth2WebUiAuthenticationFilterWithOpaque
                 .put("http-server.authentication.oauth2.issuer", "https://localhost:4444/")
                 .put("http-server.authentication.oauth2.auth-url", idpUrl + "/oauth2/auth")
                 .put("http-server.authentication.oauth2.token-url", idpUrl + "/oauth2/token")
+                .put("http-server.authentication.oauth2.end-session-url", idpUrl + "/oauth2/sessions/logout")
                 .put("http-server.authentication.oauth2.jwks-url", idpUrl + "/.well-known/jwks.json")
                 .put("http-server.authentication.oauth2.userinfo-url", idpUrl + "/userinfo")
                 .put("http-server.authentication.oauth2.client-id", TRINO_CLIENT_ID)

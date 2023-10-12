@@ -16,6 +16,7 @@ package io.trino.sql.planner.optimizations;
 import com.google.common.collect.ImmutableList;
 import io.trino.Session;
 import io.trino.cost.TableStatsProvider;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.spi.function.FunctionId;
 import io.trino.spi.predicate.Domain;
@@ -40,7 +41,6 @@ import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
 import io.trino.sql.tree.BooleanLiteral;
 import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.QualifiedName;
 
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -68,7 +68,15 @@ public class WindowFilterPushDown
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector, TableStatsProvider tableStatsProvider)
+    public PlanNode optimize(
+            PlanNode plan,
+            Session session,
+            TypeProvider types,
+            SymbolAllocator symbolAllocator,
+            PlanNodeIdAllocator idAllocator,
+            WarningCollector warningCollector,
+            PlanOptimizersStatsCollector planOptimizersStatsCollector,
+            TableStatsProvider tableStatsProvider)
     {
         requireNonNull(plan, "plan is null");
         requireNonNull(session, "session is null");
@@ -100,8 +108,8 @@ public class WindowFilterPushDown
             this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
             this.session = requireNonNull(session, "session is null");
             this.types = requireNonNull(types, "types is null");
-            rowNumberFunctionId = plannerContext.getMetadata().resolveFunction(session, QualifiedName.of("row_number"), ImmutableList.of()).getFunctionId();
-            rankFunctionId = plannerContext.getMetadata().resolveFunction(session, QualifiedName.of("rank"), ImmutableList.of()).getFunctionId();
+            rowNumberFunctionId = plannerContext.getMetadata().resolveBuiltinFunction("row_number", ImmutableList.of()).getFunctionId();
+            rankFunctionId = plannerContext.getMetadata().resolveBuiltinFunction("rank", ImmutableList.of()).getFunctionId();
             domainTranslator = new DomainTranslator(plannerContext);
         }
 
@@ -212,7 +220,7 @@ public class WindowFilterPushDown
             Expression newPredicate = ExpressionUtils.combineConjuncts(
                     plannerContext.getMetadata(),
                     extractionResult.getRemainingExpression(),
-                    domainTranslator.toPredicate(session, newTupleDomain));
+                    domainTranslator.toPredicate(newTupleDomain));
 
             if (newPredicate.equals(BooleanLiteral.TRUE_LITERAL)) {
                 return source;

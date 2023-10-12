@@ -26,6 +26,7 @@ import io.trino.spi.function.SqlType;
 import io.trino.spi.function.TypeParameter;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.Type;
+import jakarta.annotation.Nullable;
 import org.apache.datasketches.Family;
 import org.apache.datasketches.theta.SetOperation;
 import org.apache.datasketches.theta.Sketch;
@@ -33,12 +34,11 @@ import org.apache.datasketches.theta.Union;
 import org.apache.datasketches.theta.UpdateSketch;
 import org.apache.iceberg.types.Conversions;
 
-import javax.annotation.Nullable;
-
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.base.Verify.verify;
+import static io.trino.plugin.base.io.ByteBuffers.getBytes;
 import static io.trino.plugin.iceberg.IcebergTypes.convertTrinoValueToIceberg;
 import static io.trino.plugin.iceberg.TypeConverter.toIcebergTypeForNewColumn;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
@@ -107,19 +107,5 @@ public final class IcebergThetaSketchForStats
         if (input != null) {
             union.union(input);
         }
-    }
-
-    private static byte[] getBytes(ByteBuffer byteBuffer)
-    {
-        int length = byteBuffer.remaining();
-        if (byteBuffer.hasArray() && byteBuffer.arrayOffset() == 0) {
-            byte[] bytes = byteBuffer.array();
-            if (bytes.length == length) {
-                return bytes;
-            }
-        }
-        byte[] bytes = new byte[length];
-        byteBuffer.get(bytes);
-        return bytes;
     }
 }

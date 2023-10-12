@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import io.trino.operator.scalar.JsonPath;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.type.AbstractVariableWidthType;
 import io.trino.spi.type.TypeSignature;
@@ -40,12 +41,6 @@ public class JsonPathType
     }
 
     @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
     public Object getObject(Block block, int position)
     {
         if (block.isNull(position)) {
@@ -59,6 +54,6 @@ public class JsonPathType
     public void writeObject(BlockBuilder blockBuilder, Object value)
     {
         Slice pattern = Slices.utf8Slice(((JsonPath) value).pattern());
-        blockBuilder.writeBytes(pattern, 0, pattern.length()).closeEntry();
+        ((VariableWidthBlockBuilder) blockBuilder).writeEntry(pattern);
     }
 }

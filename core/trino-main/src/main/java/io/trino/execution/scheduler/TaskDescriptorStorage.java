@@ -16,8 +16,12 @@ package io.trino.execution.scheduler;
 import com.google.common.base.VerifyException;
 import com.google.common.collect.Multimap;
 import com.google.common.math.Stats;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
+import com.google.inject.Inject;
+import io.airlift.json.JsonCodec;
 import io.airlift.log.Logger;
 import io.airlift.units.DataSize;
+import io.trino.annotation.NotThreadSafe;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.StageId;
 import io.trino.metadata.Split;
@@ -26,13 +30,10 @@ import io.trino.spi.TrinoException;
 import io.trino.sql.planner.plan.PlanNodeId;
 import org.weakref.jmx.Managed;
 
-import javax.annotation.concurrent.GuardedBy;
-import javax.annotation.concurrent.NotThreadSafe;
-import javax.inject.Inject;
-
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -55,6 +56,7 @@ public class TaskDescriptorStorage
     private static final Logger log = Logger.get(TaskDescriptorStorage.class);
 
     private final long maxMemoryInBytes;
+    private final JsonCodec<Split> splitJsonCodec;
 
     @GuardedBy("this")
     private final Map<QueryId, TaskDescriptors> storages = new HashMap<>();
@@ -62,14 +64,17 @@ public class TaskDescriptorStorage
     private long reservedBytes;
 
     @Inject
-    public TaskDescriptorStorage(QueryManagerConfig config)
+    public TaskDescriptorStorage(
+            QueryManagerConfig config,
+            JsonCodec<Split> splitJsonCodec)
     {
-        this(config.getFaultTolerantExecutionTaskDescriptorStorageMaxMemory());
+        this(config.getFaultTolerantExecutionTaskDescriptorStorageMaxMemory(), splitJsonCodec);
     }
 
-    public TaskDescriptorStorage(DataSize maxMemory)
+    public TaskDescriptorStorage(DataSize maxMemory, JsonCodec<Split> splitJsonCodec)
     {
         this.maxMemoryInBytes = maxMemory.toBytes();
+        this.splitJsonCodec = requireNonNull(splitJsonCodec, "splitJsonCodec is null");
     }
 
     /**
@@ -171,7 +176,9 @@ public class TaskDescriptorStorage
             TaskDescriptors storage = storages.get(killCandidate);
             long previousReservedBytes = storage.getReservedBytes();
 
-            log.info("Failing query %s; reclaiming %s of %s task descriptor memory from %s queries; extraStorageInfo=%s", killCandidate, storage.getReservedBytes(), succinctBytes(reservedBytes), storages.size(), storage.getDebugInfo());
+            if (log.isInfoEnabled()) {
+                log.info("Failing query %s; reclaiming %s of %s task descriptor memory from %s queries; extraStorageInfo=%s", killCandidate, storage.getReservedBytes(), succinctBytes(reservedBytes), storages.size(), storage.getDebugInfo());
+            }
 
             storage.fail(new TrinoException(
                     EXCEEDED_TASK_DESCRIPTOR_STORAGE_CAPACITY,
@@ -188,7 +195,7 @@ public class TaskDescriptorStorage
     }
 
     @NotThreadSafe
-    private static class TaskDescriptors
+    private class TaskDescriptors
     {
         private final Map<TaskDescriptorKey, TaskDescriptor> descriptors = new HashMap<>();
         private long reservedBytes;
@@ -241,7 +248,14 @@ public class TaskDescriptorStorage
                             Map.Entry::getKey,
                             entry -> getDebugInfo(entry.getValue())));
 
-            return String.valueOf(debugInfoByStageId);
+            List<String> biggestSplits = descriptorsByStageId.entries().stream()
+                    .flatMap(entry -> entry.getValue().getSplits().entries().stream().map(splitEntry -> Map.entry("%s/%s".formatted(entry.getKey(), splitEntry.getKey()), splitEntry.getValue())))
+                    .sorted(Comparator.<Map.Entry<String, Split>>comparingLong(entry -> entry.getValue().getRetainedSizeInBytes()).reversed())
+                    .limit(3)
+                    .map(entry -> "{nodeId=%s, size=%s, split=%s}".formatted(entry.getKey(), entry.getValue().getRetainedSizeInBytes(), splitJsonCodec.toJson(entry.getValue())))
+                    .toList();
+
+            return "stagesInfo=%s; biggestSplits=%s".formatted(debugInfoByStageId, biggestSplits);
         }
 
         private String getDebugInfo(Collection<TaskDescriptor> taskDescriptors)

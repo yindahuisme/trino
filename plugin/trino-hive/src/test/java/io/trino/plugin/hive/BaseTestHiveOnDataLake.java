@@ -32,6 +32,7 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.minio.MinioClient;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import java.text.DateFormat;
@@ -55,6 +56,7 @@ import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.temporal.ChronoUnit.DAYS;
 import static java.time.temporal.ChronoUnit.MINUTES;
 import static java.util.Objects.requireNonNull;
@@ -95,7 +97,6 @@ public abstract class BaseTestHiveOnDataLake
         return S3HiveQueryRunner.builder(hiveMinioDataLake)
                 .setHiveProperties(
                         ImmutableMap.<String, String>builder()
-                                // This is required when using MinIO which requires path style access
                                 .put("hive.insert-existing-partitions-behavior", "OVERWRITE")
                                 .put("hive.non-managed-table-writes-enabled", "true")
                                 // Below are required to enable caching on metastore
@@ -1624,6 +1625,249 @@ public abstract class BaseTestHiveOnDataLake
         assertUpdate("DROP TABLE " + getFullyQualifiedTestTableName(tableName));
     }
 
+    @Test
+    public void testExternalLocationWithTrailingSpace()
+    {
+        String tableName = "test_external_location_with_trailing_space_" + randomNameSuffix();
+        String tableLocationDirWithTrailingSpace = tableName + " ";
+        String tableLocation = format("s3a://%s/%s/%s", bucketName, HIVE_TEST_SCHEMA, tableLocationDirWithTrailingSpace);
+
+        byte[] contents = "hello\u0001world\nbye\u0001world".getBytes(UTF_8);
+        String targetPath = format("%s/%s/test.txt", HIVE_TEST_SCHEMA, tableLocationDirWithTrailingSpace);
+        hiveMinioDataLake.getMinioClient().putObject(bucketName, contents, targetPath);
+
+        assertUpdate(format(
+                "CREATE TABLE %s (" +
+                        "  a varchar, " +
+                        "  b varchar) " +
+                        "WITH (format='TEXTFILE', external_location='%s')",
+                tableName,
+                tableLocation));
+
+        assertQuery("SELECT a, b FROM " + tableName, "VALUES ('hello', 'world'), ('bye', 'world')");
+
+        String actualTableLocation = getTableLocation(tableName);
+        assertThat(actualTableLocation).isEqualTo(tableLocation);
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test(dataProvider = "invalidObjectNames")
+    public void testCreateSchemaInvalidName(String schemaName)
+    {
+        assertThatThrownBy(() -> assertUpdate("CREATE SCHEMA \"" + schemaName + "\""))
+                .hasMessage(format("Invalid object name: '%s'", schemaName));
+    }
+
+    @DataProvider
+    public Object[][] invalidObjectNames()
+    {
+        return new Object[][] {
+                {"."},
+                {".."},
+                {"foo/bar"}};
+    }
+
+    @Test
+    public void testCreateTableInvalidName()
+    {
+        assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + HIVE_TEST_SCHEMA + ".\".\" (col integer)"))
+                .hasMessageContaining("Invalid table name");
+        assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + HIVE_TEST_SCHEMA + ".\"..\" (col integer)"))
+                .hasMessageContaining("Invalid table name");
+        assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + HIVE_TEST_SCHEMA + ".\"...\" (col integer)"))
+                .hasMessage("Invalid table name");
+
+        for (String tableName : Arrays.asList("foo/bar", "foo/./bar", "foo/../bar")) {
+            assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + HIVE_TEST_SCHEMA + ".\"" + tableName + "\" (col integer)"))
+                    .hasMessage(format("Invalid object name: '%s'", tableName));
+            assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + HIVE_TEST_SCHEMA + ".\"" + tableName + "\" (col) AS VALUES 1"))
+                    .hasMessage(format("Invalid object name: '%s'", tableName));
+        }
+    }
+
+    @Test
+    public void testRenameSchemaToInvalidObjectName()
+    {
+        String schemaName = "test_rename_schema_invalid_name_" + randomNameSuffix();
+        assertUpdate("CREATE SCHEMA " + schemaName);
+
+        for (String invalidSchemaName : Arrays.asList(".", "..", "foo/bar")) {
+            assertThatThrownBy(() -> assertUpdate("ALTER SCHEMA hive." + schemaName + " RENAME TO  \"" + invalidSchemaName + "\""))
+                    .hasMessage(format("Invalid object name: '%s'", invalidSchemaName));
+        }
+
+        assertUpdate("DROP SCHEMA " + schemaName);
+    }
+
+    @Test
+    public void testRenameTableToInvalidObjectName()
+    {
+        String tableName = "test_rename_table_invalid_name_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE %s (a_varchar varchar)".formatted(getFullyQualifiedTestTableName(tableName)));
+
+        for (String invalidTableName : Arrays.asList(".", "..", "foo/bar")) {
+            assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + getFullyQualifiedTestTableName(tableName) + " RENAME TO  \"" + invalidTableName + "\""))
+                    .hasMessage(format("Invalid object name: '%s'", invalidTableName));
+        }
+
+        for (String invalidSchemaName : Arrays.asList(".", "..", "foo/bar")) {
+            assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + getFullyQualifiedTestTableName(tableName) + " RENAME TO  \"" + invalidSchemaName + "\".validTableName"))
+                    .hasMessage(format("Invalid object name: '%s'", invalidSchemaName));
+        }
+
+        assertUpdate("DROP TABLE " + getFullyQualifiedTestTableName(tableName));
+    }
+
+    @Test
+    public void testUnpartitionedTableExternalLocationWithTrainingSlash()
+    {
+        String tableName = "test_external_location_trailing_slash_" + randomNameSuffix();
+        String tableLocationWithTrailingSlash = format("s3://%s/%s/%s/", bucketName, HIVE_TEST_SCHEMA, tableName);
+        byte[] contents = "Trino\nSQL\non\neverything".getBytes(UTF_8);
+        String dataFilePath = format("%s/%s/data.txt", HIVE_TEST_SCHEMA, tableName);
+        hiveMinioDataLake.getMinioClient().putObject(bucketName, contents, dataFilePath);
+
+        assertUpdate(format(
+                "CREATE TABLE %s (" +
+                        "  a_varchar varchar) " +
+                        "WITH (" +
+                        "   external_location='%s'," +
+                        "   format='TEXTFILE')",
+                tableName,
+                tableLocationWithTrailingSlash));
+        assertQuery("SELECT * FROM " + tableName, "VALUES 'Trino', 'SQL', 'on', 'everything'");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testUnpartitionedTableExternalLocationOnTopOfTheBucket()
+    {
+        String topBucketName = "test-hive-unpartitioned-top-of-the-bucket-" + randomNameSuffix();
+        hiveMinioDataLake.getMinio().createBucket(topBucketName);
+        String tableName = "test_external_location_top_of_the_bucket_" + randomNameSuffix();
+
+        byte[] contents = "Trino\nSQL\non\neverything".getBytes(UTF_8);
+        hiveMinioDataLake.getMinioClient().putObject(topBucketName, contents, "data.txt");
+
+        assertUpdate(format(
+                "CREATE TABLE %s (" +
+                        "  a_varchar varchar) " +
+                        "WITH (" +
+                        "   external_location='%s'," +
+                        "   format='TEXTFILE')",
+                tableName,
+                format("s3://%s/", topBucketName)));
+        assertQuery("SELECT * FROM " + tableName, "VALUES 'Trino', 'SQL', 'on', 'everything'");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testPartitionedTableExternalLocationOnTopOfTheBucket()
+    {
+        String topBucketName = "test-hive-partitioned-top-of-the-bucket-" + randomNameSuffix();
+        hiveMinioDataLake.getMinio().createBucket(topBucketName);
+        String tableName = "test_external_location_top_of_the_bucket_" + randomNameSuffix();
+
+        assertUpdate(format(
+                "CREATE TABLE %s (" +
+                        "  a_varchar varchar, " +
+                        "  pkey integer) " +
+                        "WITH (" +
+                        "   external_location='%s'," +
+                        "   partitioned_by=ARRAY['pkey'])",
+                tableName,
+                format("s3://%s/", topBucketName)));
+        assertUpdate("INSERT INTO " + tableName + " VALUES ('a', 1) , ('b', 1), ('c', 2), ('d', 2)", 4);
+        assertQuery("SELECT * FROM " + tableName, "VALUES ('a', 1), ('b',1), ('c', 2), ('d', 2)");
+        assertUpdate("DELETE FROM " + tableName + " where pkey = 2");
+        assertQuery("SELECT * FROM " + tableName, "VALUES ('a', 1), ('b',1)");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testDropStatsPartitionedTable()
+    {
+        String tableName = "test_hive_drop_stats_partitioned_table_" + randomNameSuffix();
+        assertUpdate(("CREATE TABLE %s (" +
+                "  data integer," +
+                "  p_varchar varchar," +
+                "  p_integer integer" +
+                ") " +
+                "WITH (" +
+                "  partitioned_by=ARRAY['p_varchar', 'p_integer']" +
+                ")").formatted(getFullyQualifiedTestTableName(tableName)));
+
+        // Drop stats for partition which does not exist
+        assertThatThrownBy(() -> query(format("CALL system.drop_stats('%s', '%s', ARRAY[ARRAY['partnotfound', '999']])", HIVE_TEST_SCHEMA, tableName)))
+                .hasMessage("No partition found for name: p_varchar=partnotfound/p_integer=999");
+
+        assertUpdate("INSERT INTO " + getFullyQualifiedTestTableName(tableName) + " VALUES (1, 'part1', 10) , (2, 'part2', 10), (12, 'part2', 20)", 3);
+
+        // Run analyze on the entire table
+        assertUpdate("ANALYZE " + getFullyQualifiedTestTableName(tableName), 3);
+
+        assertQuery("SHOW STATS FOR " + getFullyQualifiedTestTableName(tableName),
+                """
+                        VALUES
+                            ('data', null, 1.0, 0.0, null, 1, 12),
+                            ('p_varchar', 15.0, 2.0, 0.0, null, null, null),
+                            ('p_integer', null, 2.0, 0.0, null, 10, 20),
+                            (null, null, null, null, 3.0, null, null)
+                        """);
+
+        assertUpdate(format("CALL system.drop_stats('%s', '%s', ARRAY[ARRAY['part1', '10']])", HIVE_TEST_SCHEMA, tableName));
+
+        assertQuery("SHOW STATS FOR " + getFullyQualifiedTestTableName(tableName),
+                """
+                        VALUES
+                            ('data', null, 1.0, 0.0, null, 2, 12),
+                            ('p_varchar', 15.0, 2.0, 0.0, null, null, null),
+                            ('p_integer', null, 2.0, 0.0, null, 10, 20),
+                            (null, null, null, null, 3.0, null, null)
+                        """);
+
+        assertUpdate("DELETE FROM " + getFullyQualifiedTestTableName(tableName) + " WHERE p_varchar ='part1' and p_integer = 10");
+
+        // Drop stats for partition which does not exist
+        assertThatThrownBy(() -> query(format("CALL system.drop_stats('%s', '%s', ARRAY[ARRAY['part1', '10']])", HIVE_TEST_SCHEMA, tableName)))
+                .hasMessage("No partition found for name: p_varchar=part1/p_integer=10");
+
+        assertQuery("SHOW STATS FOR " + getFullyQualifiedTestTableName(tableName),
+                """
+                        VALUES
+                            ('data', null, 1.0, 0.0, null, 2, 12),
+                            ('p_varchar', 10.0, 1.0, 0.0, null, null, null),
+                            ('p_integer', null, 2.0, 0.0, null, 10, 20),
+                            (null, null, null, null, 2.0, null, null)
+                        """);
+        assertUpdate("DROP TABLE " + getFullyQualifiedTestTableName(tableName));
+    }
+
+    @Test
+    public void testUnsupportedDropSchemaCascadeWithNonHiveTable()
+    {
+        String schemaName = "test_unsupported_drop_schema_cascade_" + randomNameSuffix();
+        String icebergTableName = "test_dummy_iceberg_table" + randomNameSuffix();
+
+        hiveMinioDataLake.getHiveHadoop().runOnHive("CREATE DATABASE %2$s LOCATION 's3a://%1$s/%2$s'".formatted(bucketName, schemaName));
+        try {
+            hiveMinioDataLake.getHiveHadoop().runOnHive("CREATE TABLE " + schemaName + "." + icebergTableName + " TBLPROPERTIES ('table_type'='iceberg') AS SELECT 1 a");
+
+            assertQueryFails("DROP SCHEMA " + schemaName + " CASCADE", "\\QCannot query Iceberg table '%s.%s'".formatted(schemaName, icebergTableName));
+
+            assertThat(computeActual("SHOW SCHEMAS").getOnlyColumnAsSet()).contains(schemaName);
+            assertThat(computeActual("SHOW TABLES FROM " + schemaName).getOnlyColumnAsSet()).contains(icebergTableName);
+            assertThat(hiveMinioDataLake.getMinioClient().listObjects(bucketName, schemaName).stream()).isNotEmpty();
+        }
+        finally {
+            hiveMinioDataLake.getHiveHadoop().runOnHive("DROP DATABASE IF EXISTS " + schemaName + " CASCADE");
+        }
+    }
+
     private void renamePartitionResourcesOutsideTrino(String tableName, String partitionColumn, String regionKey)
     {
         String partitionName = format("%s=%s", partitionColumn, regionKey);
@@ -1813,5 +2057,10 @@ public abstract class BaseTestHiveOnDataLake
                                 e.getKey(),
                                 PartitionStatistics.empty()))
                         .collect(toImmutableList()));
+    }
+
+    private String getTableLocation(String tableName)
+    {
+        return (String) computeScalar("SELECT DISTINCT regexp_replace(\"$path\", '/[^/]*$', '') FROM " + tableName);
     }
 }

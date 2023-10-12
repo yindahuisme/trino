@@ -86,48 +86,29 @@ public class TestCassandraConnectorTest
     private CassandraServer server;
     private CassandraSession session;
 
-    @SuppressWarnings("DuplicateBranchesInSwitch")
     @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
-        switch (connectorBehavior) {
-            case SUPPORTS_TOPN_PUSHDOWN:
-                return false;
-
-            case SUPPORTS_CREATE_SCHEMA:
-                return false;
-
-            case SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT:
-            case SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT:
-            case SUPPORTS_RENAME_TABLE:
-                return false;
-
-            case SUPPORTS_ADD_COLUMN:
-            case SUPPORTS_RENAME_COLUMN:
-            case SUPPORTS_SET_COLUMN_TYPE:
-                return false;
-
-            case SUPPORTS_COMMENT_ON_TABLE:
-            case SUPPORTS_COMMENT_ON_COLUMN:
-                return false;
-
-            case SUPPORTS_CREATE_VIEW:
-                return false;
-
-            case SUPPORTS_NOT_NULL_CONSTRAINT:
-                return false;
-
-            case SUPPORTS_DELETE:
-            case SUPPORTS_TRUNCATE:
-                return true;
-
-            case SUPPORTS_ARRAY:
-            case SUPPORTS_ROW_TYPE:
-                return false;
-
-            default:
-                return super.hasBehavior(connectorBehavior);
-        }
+        return switch (connectorBehavior) {
+            case SUPPORTS_ADD_COLUMN,
+                    SUPPORTS_ARRAY,
+                    SUPPORTS_COMMENT_ON_COLUMN,
+                    SUPPORTS_COMMENT_ON_TABLE,
+                    SUPPORTS_CREATE_MATERIALIZED_VIEW,
+                    SUPPORTS_CREATE_SCHEMA,
+                    SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT,
+                    SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT,
+                    SUPPORTS_CREATE_VIEW,
+                    SUPPORTS_MERGE,
+                    SUPPORTS_NOT_NULL_CONSTRAINT,
+                    SUPPORTS_RENAME_COLUMN,
+                    SUPPORTS_RENAME_TABLE,
+                    SUPPORTS_ROW_TYPE,
+                    SUPPORTS_SET_COLUMN_TYPE,
+                    SUPPORTS_TOPN_PUSHDOWN,
+                    SUPPORTS_UPDATE -> false;
+            default -> super.hasBehavior(connectorBehavior);
+        };
     }
 
     @Override
@@ -919,7 +900,7 @@ public class TestCassandraConnectorTest
         // There is no way to figure out what the exactly keyspace we want to retrieve tables from
         assertQueryFailsEventually(
                 "SHOW TABLES FROM cassandra.keyspace_3",
-                "More than one keyspace has been found for the case insensitive schema name: keyspace_3 -> \\(KeYsPaCe_3, kEySpAcE_3\\)",
+                "Error listing tables for catalog cassandra: More than one keyspace has been found for the case insensitive schema name: keyspace_3 -> \\(KeYsPaCe_3, kEySpAcE_3\\)",
                 new Duration(1, MINUTES));
 
         session.execute("DROP KEYSPACE \"KeYsPaCe_3\"");
@@ -1391,31 +1372,55 @@ public class TestCassandraConnectorTest
     }
 
     @Test
+    public void testNativeQueryColumnAlias()
+    {
+        assertThat(query("SELECT region_name FROM TABLE(system.query(query => 'SELECT name AS region_name FROM tpch.region WHERE regionkey = 0 ALLOW FILTERING'))"))
+                .matches("VALUES CAST('AFRICA' AS VARCHAR)");
+    }
+
+    @Test
+    public void testNativeQueryColumnAliasNotFound()
+    {
+        assertQueryFails(
+                "SELECT name FROM TABLE(system.query(query => 'SELECT name AS region_name FROM tpch.region'))",
+                ".* Column 'name' cannot be resolved");
+        assertQueryFails(
+                "SELECT column_not_found FROM TABLE(system.query(query => 'SELECT name AS region_name FROM tpch.region'))",
+                ".* Column 'column_not_found' cannot be resolved");
+    }
+
+    @Test
     public void testNativeQuerySelectFromTestTable()
     {
-        String tableName = "tpch.test_select" + randomNameSuffix();
-        onCassandra("CREATE TABLE " + tableName + "(col BIGINT PRIMARY KEY)");
+        String tableName = "test_select" + randomNameSuffix();
+        onCassandra("CREATE TABLE tpch." + tableName + "(col BIGINT PRIMARY KEY)");
+        onCassandra("INSERT INTO tpch." + tableName + "(col) VALUES (1)");
+        assertContainsEventually(() -> execute("SHOW TABLES FROM cassandra.tpch"), resultBuilder(getSession(), createUnboundedVarcharType())
+                .row(tableName)
+                .build(), new Duration(1, MINUTES));
 
-        onCassandra("INSERT INTO " + tableName + "(col) VALUES (1)");
         assertQuery(
-                "SELECT * FROM TABLE(cassandra.system.query(query => 'SELECT * FROM " + tableName + "'))",
+                "SELECT * FROM TABLE(cassandra.system.query(query => 'SELECT * FROM tpch." + tableName + "'))",
                 "VALUES 1");
 
-        onCassandra("DROP TABLE " + tableName);
+        onCassandra("DROP TABLE tpch." + tableName);
     }
 
     @Test
     public void testNativeQueryCaseSensitivity()
     {
-        String tableName = "tpch.test_case" + randomNameSuffix();
-        onCassandra("CREATE TABLE " + tableName + "(col_case BIGINT PRIMARY KEY, \"COL_CASE\" BIGINT)");
+        String tableName = "test_case" + randomNameSuffix();
+        onCassandra("CREATE TABLE tpch." + tableName + "(col_case BIGINT PRIMARY KEY, \"COL_CASE\" BIGINT)");
+        onCassandra("INSERT INTO tpch." + tableName + "(col_case, \"COL_CASE\") VALUES (1, 2)");
+        assertContainsEventually(() -> execute("SHOW TABLES FROM cassandra.tpch"), resultBuilder(getSession(), createUnboundedVarcharType())
+                .row(tableName)
+                .build(), new Duration(1, MINUTES));
 
-        onCassandra("INSERT INTO " + tableName + "(col_case, \"COL_CASE\") VALUES (1, 2)");
         assertQuery(
-                "SELECT * FROM TABLE(cassandra.system.query(query => 'SELECT * FROM " + tableName + "'))",
+                "SELECT * FROM TABLE(cassandra.system.query(query => 'SELECT * FROM tpch." + tableName + "'))",
                 "VALUES (1, 2)");
 
-        onCassandra("DROP TABLE " + tableName);
+        onCassandra("DROP TABLE tpch." + tableName);
     }
 
     @Test
@@ -1434,7 +1439,8 @@ public class TestCassandraConnectorTest
         String tableName = "test_insert" + randomNameSuffix();
         assertFalse(getQueryRunner().tableExists(getSession(), tableName));
         assertThatThrownBy(() -> query("SELECT * FROM TABLE(cassandra.system.query(query => 'INSERT INTO tpch." + tableName + "(col) VALUES (1)'))"))
-                .hasMessageContaining("unconfigured table");
+                .hasMessage("Cannot get column definition")
+                .hasStackTraceContaining("unconfigured table");
     }
 
     @Test
@@ -1443,6 +1449,9 @@ public class TestCassandraConnectorTest
         String tableName = "test_unsupported_statement" + randomNameSuffix();
         onCassandra("CREATE TABLE tpch." + tableName + "(col INT PRIMARY KEY)");
         onCassandra("INSERT INTO tpch." + tableName + "(col) VALUES (1)");
+        assertContainsEventually(() -> execute("SHOW TABLES FROM cassandra.tpch"), resultBuilder(getSession(), createUnboundedVarcharType())
+                .row(tableName)
+                .build(), new Duration(1, MINUTES));
 
         assertThatThrownBy(() -> query("SELECT * FROM TABLE(cassandra.system.query(query => 'INSERT INTO tpch." + tableName + "(col) VALUES (3)'))"))
                 .hasMessage("Handle doesn't have columns info");
@@ -1458,7 +1467,8 @@ public class TestCassandraConnectorTest
     public void testNativeQueryIncorrectSyntax()
     {
         assertThatThrownBy(() -> query("SELECT * FROM TABLE(system.query(query => 'some wrong syntax'))"))
-                .hasMessageContaining("no viable alternative at input 'some'");
+                .hasMessage("Cannot get column definition")
+                .hasStackTraceContaining("no viable alternative at input 'some'");
     }
 
     @Override
@@ -1559,7 +1569,7 @@ public class TestCassandraConnectorTest
         }
     }
 
-    private MaterializedResult execute(String sql)
+    private MaterializedResult execute(@Language("SQL") String sql)
     {
         return getQueryRunner().execute(SESSION, sql);
     }

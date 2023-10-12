@@ -22,6 +22,7 @@ import com.google.common.collect.Sets;
 import io.trino.Session;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.cost.TableStatsProvider;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
 import io.trino.spi.connector.ColumnHandle;
@@ -81,6 +82,7 @@ import io.trino.sql.planner.plan.TableFunctionNode.PassThroughSpecification;
 import io.trino.sql.planner.plan.TableFunctionNode.TableArgumentProperties;
 import io.trino.sql.planner.plan.TableFunctionProcessorNode;
 import io.trino.sql.planner.plan.TableScanNode;
+import io.trino.sql.planner.plan.TableUpdateNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
@@ -141,7 +143,15 @@ public class UnaliasSymbolReferences
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector, TableStatsProvider tableStatsProvider)
+    public PlanNode optimize(
+            PlanNode plan,
+            Session session,
+            TypeProvider types,
+            SymbolAllocator symbolAllocator,
+            PlanNodeIdAllocator idAllocator,
+            WarningCollector warningCollector,
+            PlanOptimizersStatsCollector planOptimizersStatsCollector,
+            TableStatsProvider tableStatsProvider)
     {
         requireNonNull(plan, "plan is null");
         requireNonNull(session, "session is null");
@@ -359,6 +369,7 @@ public class UnaliasSymbolReferences
                     new TableFunctionNode(
                             node.getId(),
                             node.getName(),
+                            node.getFunctionCatalog(),
                             node.getArguments(),
                             newProperOutputs,
                             newSources.build(),
@@ -677,6 +688,19 @@ public class UnaliasSymbolReferences
 
             return new PlanAndMappings(
                     new TableDeleteNode(node.getId(), node.getTarget(), newOutput),
+                    mapping);
+        }
+
+        @Override
+        public PlanAndMappings visitTableUpdate(TableUpdateNode node, UnaliasContext context)
+        {
+            Map<Symbol, Symbol> mapping = new HashMap<>(context.getCorrelationMapping());
+            SymbolMapper mapper = symbolMapper(mapping);
+
+            Symbol newOutput = mapper.map(node.getOutput());
+
+            return new PlanAndMappings(
+                    new TableUpdateNode(node.getId(), node.getTarget(), newOutput),
                     mapping);
         }
 

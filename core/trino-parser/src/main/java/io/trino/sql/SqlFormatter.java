@@ -47,6 +47,7 @@ import io.trino.sql.tree.DropTable;
 import io.trino.sql.tree.DropView;
 import io.trino.sql.tree.Except;
 import io.trino.sql.tree.Execute;
+import io.trino.sql.tree.ExecuteImmediate;
 import io.trino.sql.tree.Explain;
 import io.trino.sql.tree.ExplainAnalyze;
 import io.trino.sql.tree.ExplainFormat;
@@ -65,6 +66,9 @@ import io.trino.sql.tree.Join;
 import io.trino.sql.tree.JoinCriteria;
 import io.trino.sql.tree.JoinOn;
 import io.trino.sql.tree.JoinUsing;
+import io.trino.sql.tree.JsonTable;
+import io.trino.sql.tree.JsonTableColumnDefinition;
+import io.trino.sql.tree.JsonTableDefaultPlan;
 import io.trino.sql.tree.Lateral;
 import io.trino.sql.tree.LikeClause;
 import io.trino.sql.tree.Limit;
@@ -74,15 +78,21 @@ import io.trino.sql.tree.MergeDelete;
 import io.trino.sql.tree.MergeInsert;
 import io.trino.sql.tree.MergeUpdate;
 import io.trino.sql.tree.NaturalJoin;
+import io.trino.sql.tree.NestedColumns;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.Offset;
 import io.trino.sql.tree.OrderBy;
+import io.trino.sql.tree.OrdinalityColumn;
 import io.trino.sql.tree.PatternRecognitionRelation;
+import io.trino.sql.tree.PlanLeaf;
+import io.trino.sql.tree.PlanParentChild;
+import io.trino.sql.tree.PlanSiblings;
 import io.trino.sql.tree.Prepare;
 import io.trino.sql.tree.PrincipalSpecification;
 import io.trino.sql.tree.Property;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
+import io.trino.sql.tree.QueryColumn;
 import io.trino.sql.tree.QueryPeriod;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.RefreshMaterializedView;
@@ -93,6 +103,7 @@ import io.trino.sql.tree.RenameSchema;
 import io.trino.sql.tree.RenameTable;
 import io.trino.sql.tree.RenameView;
 import io.trino.sql.tree.ResetSession;
+import io.trino.sql.tree.ResetSessionAuthorization;
 import io.trino.sql.tree.Revoke;
 import io.trino.sql.tree.RevokeRoles;
 import io.trino.sql.tree.Rollback;
@@ -107,6 +118,7 @@ import io.trino.sql.tree.SetProperties;
 import io.trino.sql.tree.SetRole;
 import io.trino.sql.tree.SetSchemaAuthorization;
 import io.trino.sql.tree.SetSession;
+import io.trino.sql.tree.SetSessionAuthorization;
 import io.trino.sql.tree.SetTableAuthorization;
 import io.trino.sql.tree.SetTimeZone;
 import io.trino.sql.tree.SetViewAuthorization;
@@ -137,6 +149,7 @@ import io.trino.sql.tree.Union;
 import io.trino.sql.tree.Unnest;
 import io.trino.sql.tree.Update;
 import io.trino.sql.tree.UpdateAssignment;
+import io.trino.sql.tree.ValueColumn;
 import io.trino.sql.tree.Values;
 import io.trino.sql.tree.WithQuery;
 
@@ -149,12 +162,14 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.sql.ExpressionFormatter.formatGroupBy;
+import static io.trino.sql.ExpressionFormatter.formatJsonPathInvocation;
 import static io.trino.sql.ExpressionFormatter.formatOrderBy;
 import static io.trino.sql.ExpressionFormatter.formatSkipTo;
 import static io.trino.sql.ExpressionFormatter.formatStringLiteral;
 import static io.trino.sql.ExpressionFormatter.formatWindowSpecification;
 import static io.trino.sql.RowPatternFormatter.formatPattern;
-import static java.lang.String.format;
+import static io.trino.sql.tree.SaveMode.IGNORE;
+import static io.trino.sql.tree.SaveMode.REPLACE;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
@@ -187,13 +202,6 @@ public final class SqlFormatter
     {
         return ExpressionFormatter.formatExpression(expression);
     }
-
-    /**
-     * @deprecated Use {@link #formatName(Identifier)} instead.
-     */
-    @Deprecated
-    @SuppressWarnings("unused")
-    private static void formatExpression(Identifier identifier) {}
 
     private static class Formatter
             extends AstVisitor<Void, Integer>
@@ -262,6 +270,161 @@ public final class SqlFormatter
             if (node.isWithOrdinality()) {
                 builder.append(" WITH ORDINALITY");
             }
+            return null;
+        }
+
+        @Override
+        protected Void visitJsonTable(JsonTable node, Integer indent)
+        {
+            builder.append("JSON_TABLE (")
+                    .append(formatJsonPathInvocation(node.getJsonPathInvocation()))
+                    .append("\n");
+            appendJsonTableColumns(node.getColumns(), indent + 1);
+            node.getPlan().ifPresent(plan -> {
+                builder.append("\n");
+                if (plan instanceof JsonTableDefaultPlan) {
+                    append(indent + 1, "PLAN DEFAULT (");
+                }
+                else {
+                    append(indent + 1, "PLAN (");
+                }
+                process(plan, indent + 1);
+                builder.append(")");
+            });
+            node.getErrorBehavior().ifPresent(behavior -> {
+                builder.append("\n");
+                append(indent + 1, behavior + " ON ERROR");
+            });
+            builder.append(")\n");
+            return null;
+        }
+
+        private void appendJsonTableColumns(List<JsonTableColumnDefinition> columns, int indent)
+        {
+            append(indent, "COLUMNS (\n");
+            for (int i = 0; i < columns.size() - 1; i++) {
+                process(columns.get(i), indent + 1);
+                builder.append(",\n");
+            }
+            process(columns.get(columns.size() - 1), indent + 1);
+            builder.append(")");
+        }
+
+        @Override
+        protected Void visitOrdinalityColumn(OrdinalityColumn node, Integer indent)
+        {
+            append(indent, formatName(node.getName()) + " FOR ORDINALITY");
+            return null;
+        }
+
+        @Override
+        protected Void visitValueColumn(ValueColumn node, Integer indent)
+        {
+            append(indent, formatName(node.getName()))
+                    .append(" ")
+                    .append(formatExpression(node.getType()));
+            node.getJsonPath().ifPresent(path ->
+                    builder.append(" PATH ")
+                            .append(formatExpression(path)));
+            builder.append(" ")
+                    .append(node.getEmptyBehavior().name())
+                    .append(node.getEmptyDefault().map(expression -> " " + formatExpression(expression)).orElse(""))
+                    .append(" ON EMPTY");
+            node.getErrorBehavior().ifPresent(behavior ->
+                    builder.append(" ")
+                            .append(behavior.name())
+                            .append(node.getErrorDefault().map(expression -> " " + formatExpression(expression)).orElse(""))
+                            .append(" ON ERROR"));
+            return null;
+        }
+
+        @Override
+        protected Void visitQueryColumn(QueryColumn node, Integer indent)
+        {
+            append(indent, formatName(node.getName()))
+                    .append(" ")
+                    .append(formatExpression(node.getType()))
+                    .append(" FORMAT ")
+                    .append(node.getFormat().name());
+            node.getJsonPath().ifPresent(path ->
+                    builder.append(" PATH ")
+                            .append(formatExpression(path)));
+            builder.append(switch (node.getWrapperBehavior()) {
+                case WITHOUT -> " WITHOUT ARRAY WRAPPER";
+                case CONDITIONAL -> " WITH CONDITIONAL ARRAY WRAPPER";
+                case UNCONDITIONAL -> (" WITH UNCONDITIONAL ARRAY WRAPPER");
+            });
+
+            if (node.getQuotesBehavior().isPresent()) {
+                builder.append(switch (node.getQuotesBehavior().get()) {
+                    case KEEP -> " KEEP QUOTES ON SCALAR STRING";
+                    case OMIT -> " OMIT QUOTES ON SCALAR STRING";
+                });
+            }
+            builder.append(" ")
+                    .append(node.getEmptyBehavior().toString())
+                    .append(" ON EMPTY");
+            node.getErrorBehavior().ifPresent(behavior ->
+                    builder.append(" ")
+                            .append(behavior.toString())
+                            .append(" ON ERROR"));
+            return null;
+        }
+
+        @Override
+        protected Void visitNestedColumns(NestedColumns node, Integer indent)
+        {
+            append(indent, "NESTED PATH ")
+                    .append(formatExpression(node.getJsonPath()));
+            node.getPathName().ifPresent(name ->
+                    builder.append(" AS ")
+                            .append(formatName(name)));
+            builder.append("\n");
+            appendJsonTableColumns(node.getColumns(), indent + 1);
+            return null;
+        }
+
+        @Override
+        protected Void visitJsonTableDefaultPlan(JsonTableDefaultPlan node, Integer indent)
+        {
+            builder.append(node.getParentChild().name())
+                    .append(", ")
+                    .append(node.getSiblings().name());
+            return null;
+        }
+
+        @Override
+        protected Void visitPlanParentChild(PlanParentChild node, Integer indent)
+        {
+            process(node.getParent());
+            builder.append(" ")
+                    .append(node.getType().name())
+                    .append(" (");
+            process(node.getChild());
+            builder.append(")");
+            return null;
+        }
+
+        @Override
+        protected Void visitPlanSiblings(PlanSiblings node, Integer context)
+        {
+            for (int i = 0; i < node.getSiblings().size() - 1; i++) {
+                builder.append("(");
+                process(node.getSiblings().get(i));
+                builder.append(") ")
+                        .append(node.getType().name())
+                        .append(" ");
+            }
+            builder.append("(");
+            process(node.getSiblings().get(node.getSiblings().size() - 1));
+            builder.append(")");
+            return null;
+        }
+
+        @Override
+        protected Void visitPlanLeaf(PlanLeaf node, Integer context)
+        {
+            builder.append(formatName(node.getName()));
             return null;
         }
 
@@ -409,6 +572,21 @@ public final class SqlFormatter
             List<Expression> parameters = node.getParameters();
             if (!parameters.isEmpty()) {
                 builder.append(" USING ");
+                builder.append(parameters.stream()
+                        .map(SqlFormatter::formatExpression)
+                        .collect(joining(", ")));
+            }
+            return null;
+        }
+
+        @Override
+        protected Void visitExecuteImmediate(ExecuteImmediate node, Integer indent)
+        {
+            append(indent, "EXECUTE IMMEDIATE\n")
+                    .append(formatStringLiteral(node.getStatement().getValue()));
+            List<Expression> parameters = node.getParameters();
+            if (!parameters.isEmpty()) {
+                builder.append("\nUSING ");
                 builder.append(parameters.stream()
                         .map(SqlFormatter::formatExpression)
                         .collect(joining(", ")));
@@ -691,24 +869,14 @@ public final class SqlFormatter
             }
 
             node.getRowsPerMatch().ifPresent(rowsPerMatch -> {
-                String rowsPerMatchDescription;
-                switch (rowsPerMatch) {
-                    case ONE:
-                        rowsPerMatchDescription = "ONE ROW PER MATCH";
-                        break;
-                    case ALL_SHOW_EMPTY:
-                        rowsPerMatchDescription = "ALL ROWS PER MATCH SHOW EMPTY MATCHES";
-                        break;
-                    case ALL_OMIT_EMPTY:
-                        rowsPerMatchDescription = "ALL ROWS PER MATCH OMIT EMPTY MATCHES";
-                        break;
-                    case ALL_WITH_UNMATCHED:
-                        rowsPerMatchDescription = "ALL ROWS PER MATCH WITH UNMATCHED ROWS";
-                        break;
-                    default:
-                        // RowsPerMatch of type WINDOW cannot occur in MATCH_RECOGNIZE clause
-                        throw new IllegalStateException("unexpected rowsPerMatch: " + node.getRowsPerMatch().get());
-                }
+                String rowsPerMatchDescription = switch (rowsPerMatch) {
+                    case ONE -> "ONE ROW PER MATCH";
+                    case ALL_SHOW_EMPTY -> "ALL ROWS PER MATCH SHOW EMPTY MATCHES";
+                    case ALL_OMIT_EMPTY -> "ALL ROWS PER MATCH OMIT EMPTY MATCHES";
+                    case ALL_WITH_UNMATCHED -> "ALL ROWS PER MATCH WITH UNMATCHED ROWS";
+                    default -> // RowsPerMatch of type WINDOW cannot occur in MATCH_RECOGNIZE clause
+                            throw new IllegalStateException("unexpected rowsPerMatch: " + node.getRowsPerMatch().get());
+                };
                 append(indent + 1, rowsPerMatchDescription)
                         .append("\n");
             });
@@ -1207,6 +1375,10 @@ public final class SqlFormatter
         {
             builder.append("SHOW FUNCTIONS");
 
+            node.getSchema().ifPresent(value -> builder
+                    .append(" FROM ")
+                    .append(formatName(value)));
+
             node.getLikePattern().ifPresent(value -> builder
                     .append(" LIKE ")
                     .append(formatStringLiteral(value)));
@@ -1336,17 +1508,20 @@ public final class SqlFormatter
         @Override
         protected Void visitCreateTableAsSelect(CreateTableAsSelect node, Integer indent)
         {
-            builder.append("CREATE TABLE ");
-            if (node.isNotExists()) {
+            builder.append("CREATE ");
+            if (node.getSaveMode() == REPLACE) {
+                builder.append("OR REPLACE ");
+            }
+            builder.append("TABLE ");
+            if (node.getSaveMode() == IGNORE) {
                 builder.append("IF NOT EXISTS ");
             }
             builder.append(formatName(node.getName()));
 
             node.getColumnAliases().ifPresent(columnAliases -> {
-                String columnList = columnAliases.stream()
+                builder.append(columnAliases.stream()
                         .map(SqlFormatter::formatName)
-                        .collect(joining(", "));
-                builder.append(format("( %s )", columnList));
+                        .collect(joining(", ", "( ", " )")));
             });
 
             node.getComment().ifPresent(comment -> builder
@@ -1367,8 +1542,12 @@ public final class SqlFormatter
         @Override
         protected Void visitCreateTable(CreateTable node, Integer indent)
         {
-            builder.append("CREATE TABLE ");
-            if (node.isNotExists()) {
+            builder.append("CREATE ");
+            if (node.getSaveMode() == REPLACE) {
+                builder.append("OR REPLACE ");
+            }
+            builder.append("TABLE ");
+            if (node.getSaveMode() == IGNORE) {
                 builder.append("IF NOT EXISTS ");
             }
             String tableName = formatName(node.getName());
@@ -1451,27 +1630,19 @@ public final class SqlFormatter
         private static String formatGrantor(GrantorSpecification grantor)
         {
             GrantorSpecification.Type type = grantor.getType();
-            switch (type) {
-                case CURRENT_ROLE:
-                case CURRENT_USER:
-                    return type.name();
-                case PRINCIPAL:
-                    return formatPrincipal(grantor.getPrincipal().get());
-            }
-            throw new IllegalArgumentException("Unsupported principal type: " + type);
+            return switch (type) {
+                case CURRENT_ROLE, CURRENT_USER -> type.name();
+                case PRINCIPAL -> formatPrincipal(grantor.getPrincipal().get());
+            };
         }
 
         private static String formatPrincipal(PrincipalSpecification principal)
         {
             PrincipalSpecification.Type type = principal.getType();
-            switch (type) {
-                case UNSPECIFIED:
-                    return principal.getName().toString();
-                case USER:
-                case ROLE:
-                    return format("%s %s", type.name(), principal.getName());
-            }
-            throw new IllegalArgumentException("Unsupported principal type: " + type);
+            return switch (type) {
+                case UNSPECIFIED -> principal.getName().toString();
+                case USER, ROLE -> type.name() + " " + principal.getName();
+            };
         }
 
         @Override
@@ -1505,16 +1676,11 @@ public final class SqlFormatter
         {
             SetProperties.Type type = node.getType();
             builder.append("ALTER ");
-            switch (type) {
-                case TABLE:
-                    builder.append("TABLE ");
-                    break;
-                case MATERIALIZED_VIEW:
-                    builder.append("MATERIALIZED VIEW ");
-                    break;
-                default:
-                    throw new IllegalArgumentException("Unsupported SetProperties.Type: " + type);
-            }
+            builder.append(switch (type) {
+                case TABLE -> "TABLE ";
+                case MATERIALIZED_VIEW -> "MATERIALIZED VIEW ";
+            });
+
             builder.append(formatName(node.getName()))
                     .append(" SET PROPERTIES ")
                     .append(joinProperties(node.getProperties()));
@@ -1537,26 +1703,13 @@ public final class SqlFormatter
                     .map(ExpressionFormatter::formatStringLiteral)
                     .orElse("NULL");
 
-            switch (node.getType()) {
-                case TABLE:
-                    builder.append("COMMENT ON TABLE ")
-                            .append(formatName(node.getName()))
-                            .append(" IS ")
-                            .append(comment);
-                    break;
-                case VIEW:
-                    builder.append("COMMENT ON VIEW ")
-                            .append(formatName(node.getName()))
-                            .append(" IS ")
-                            .append(comment);
-                    break;
-                case COLUMN:
-                    builder.append("COMMENT ON COLUMN ")
-                            .append(formatName(node.getName()))
-                            .append(" IS ")
-                            .append(comment);
-                    break;
-            }
+            String type = switch (node.getType()) {
+                case TABLE -> "TABLE";
+                case VIEW -> "VIEW";
+                case COLUMN -> "COLUMN";
+            };
+
+            builder.append("COMMENT ON " + type + " " + formatName(node.getName()) + " IS " + comment);
 
             return null;
         }
@@ -1743,6 +1896,21 @@ public final class SqlFormatter
         }
 
         @Override
+        protected Void visitSetSessionAuthorization(SetSessionAuthorization node, Integer context)
+        {
+            builder.append("SET SESSION AUTHORIZATION ");
+            builder.append(formatExpression(node.getUser()));
+            return null;
+        }
+
+        @Override
+        protected Void visitResetSessionAuthorization(ResetSessionAuthorization node, Integer context)
+        {
+            builder.append("RESET SESSION AUTHORIZATION");
+            return null;
+        }
+
+        @Override
         protected Void visitCallArgument(CallArgument node, Integer indent)
         {
             node.getName().ifPresent(name -> builder
@@ -1910,17 +2078,10 @@ public final class SqlFormatter
         {
             builder.append("SET ROLE ");
             SetRole.Type type = node.getType();
-            switch (type) {
-                case ALL:
-                case NONE:
-                    builder.append(type.name());
-                    break;
-                case ROLE:
-                    builder.append(formatName(node.getRole().get()));
-                    break;
-                default:
-                    throw new IllegalArgumentException("Unsupported type: " + type);
-            }
+            builder.append(switch (type) {
+                case ALL, NONE -> type.name();
+                case ROLE -> formatName(node.getRole().get());
+            });
             node.getCatalog().ifPresent(catalog -> builder
                     .append(" IN ")
                     .append(formatName(catalog)));

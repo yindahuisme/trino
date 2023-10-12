@@ -18,6 +18,8 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.Type;
 
 import java.util.List;
@@ -36,23 +38,25 @@ public class StructEncoding
     @Override
     public void encodeValue(Block block, int position, SliceOutput output)
     {
-        Block row = block.getObject(position, Block.class);
+        SqlRow row = block.getObject(position, SqlRow.class);
+        int rawIndex = row.getRawIndex();
 
         // write values
-        for (int batchStart = 0; batchStart < row.getPositionCount(); batchStart += 8) {
+        for (int batchStart = 0; batchStart < row.getFieldCount(); batchStart += 8) {
             int batchEnd = Math.min(batchStart + 8, structFields.size());
 
             int nullByte = 0;
             for (int fieldId = batchStart; fieldId < batchEnd; fieldId++) {
-                if (!row.isNull(fieldId)) {
+                if (!row.getRawFieldBlock(fieldId).isNull(rawIndex)) {
                     nullByte |= (1 << (fieldId % 8));
                 }
             }
             output.writeByte(nullByte);
             for (int fieldId = batchStart; fieldId < batchEnd; fieldId++) {
-                if (!row.isNull(fieldId)) {
+                Block fieldBlock = row.getRawFieldBlock(fieldId);
+                if (!fieldBlock.isNull(rawIndex)) {
                     BinaryColumnEncoding field = structFields.get(fieldId);
-                    field.encodeValueInto(row, fieldId, output);
+                    field.encodeValueInto(fieldBlock, rawIndex, output);
                 }
             }
         }
@@ -61,40 +65,38 @@ public class StructEncoding
     @Override
     public void decodeValueInto(BlockBuilder builder, Slice slice, int offset, int length)
     {
-        int fieldId = 0;
-        int nullByte = 0;
-        int elementOffset = offset;
-        BlockBuilder rowBuilder = builder.beginBlockEntry();
-        while (fieldId < structFields.size() && elementOffset < offset + length) {
-            BinaryColumnEncoding field = structFields.get(fieldId);
+        ((RowBlockBuilder) builder).buildEntry(fieldBuilders -> {
+            int fieldId = 0;
+            int nullByte = 0;
+            int elementOffset = offset;
+            while (fieldId < structFields.size() && elementOffset < offset + length) {
+                BinaryColumnEncoding field = structFields.get(fieldId);
 
-            // null byte prefixes every 8 fields
-            if ((fieldId % 8) == 0) {
-                nullByte = slice.getByte(elementOffset);
-                elementOffset++;
+                // null byte prefixes every 8 fields
+                if ((fieldId % 8) == 0) {
+                    nullByte = slice.getByte(elementOffset);
+                    elementOffset++;
+                }
+
+                // read field
+                if ((nullByte & (1 << (fieldId % 8))) != 0) {
+                    int valueOffset = field.getValueOffset(slice, elementOffset);
+                    int valueLength = field.getValueLength(slice, elementOffset);
+
+                    field.decodeValueInto(fieldBuilders.get(fieldId), slice, elementOffset + valueOffset, valueLength);
+
+                    elementOffset = elementOffset + valueOffset + valueLength;
+                }
+                else {
+                    fieldBuilders.get(fieldId).appendNull();
+                }
+                fieldId++;
             }
-
-            // read field
-            if ((nullByte & (1 << (fieldId % 8))) != 0) {
-                int valueOffset = field.getValueOffset(slice, elementOffset);
-                int valueLength = field.getValueLength(slice, elementOffset);
-
-                field.decodeValueInto(rowBuilder, slice, elementOffset + valueOffset, valueLength);
-
-                elementOffset = elementOffset + valueOffset + valueLength;
+            // Sometimes a struct does not have all fields written, so we fill with nulls
+            while (fieldId < structFields.size()) {
+                fieldBuilders.get(fieldId).appendNull();
+                fieldId++;
             }
-            else {
-                rowBuilder.appendNull();
-            }
-            fieldId++;
-        }
-
-        // Sometimes a struct does not have all fields written, so we fill with nulls
-        while (fieldId < structFields.size()) {
-            rowBuilder.appendNull();
-            fieldId++;
-        }
-
-        builder.closeEntry();
+        });
     }
 }

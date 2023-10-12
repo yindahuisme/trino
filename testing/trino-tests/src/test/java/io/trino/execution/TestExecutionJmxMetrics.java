@@ -21,17 +21,18 @@ import io.trino.server.PrefixObjectNameGeneratorModule;
 import io.trino.spi.QueryId;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.tests.tpch.TpchQueryRunnerBuilder;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
+import static io.trino.execution.QueryRunnerUtil.cancelQuery;
+import static io.trino.execution.QueryRunnerUtil.createQuery;
+import static io.trino.execution.QueryRunnerUtil.waitForQueryState;
 import static io.trino.execution.QueryState.FAILED;
 import static io.trino.execution.QueryState.QUEUED;
 import static io.trino.execution.QueryState.RUNNING;
-import static io.trino.execution.TestQueryRunnerUtil.cancelQuery;
-import static io.trino.execution.TestQueryRunnerUtil.createQuery;
-import static io.trino.execution.TestQueryRunnerUtil.waitForQueryState;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.testng.Assert.assertEquals;
 
@@ -39,7 +40,8 @@ public class TestExecutionJmxMetrics
 {
     private static final String LONG_RUNNING_QUERY = "SELECT COUNT(*) FROM tpch.sf100000.lineitem";
 
-    @Test(timeOut = 30_000)
+    @Test
+    @Timeout(30)
     public void testQueryStats()
             throws Exception
     {

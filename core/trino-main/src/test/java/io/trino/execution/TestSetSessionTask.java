@@ -35,9 +35,10 @@ import io.trino.sql.tree.SetSession;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.testing.LocalQueryRunner;
 import io.trino.transaction.TransactionManager;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.net.URI;
 import java.util.List;
@@ -48,17 +49,21 @@ import java.util.concurrent.ExecutorService;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
 import static io.trino.spi.StandardErrorCode.INVALID_SESSION_PROPERTY;
 import static io.trino.spi.session.PropertyMetadata.enumProperty;
 import static io.trino.spi.session.PropertyMetadata.integerProperty;
 import static io.trino.spi.session.PropertyMetadata.stringProperty;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.testing.TestingSession.testSession;
 import static java.lang.String.format;
 import static java.util.Collections.emptyList;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.testng.Assert.assertEquals;
 
+@TestInstance(PER_CLASS)
 public class TestSetSessionTask
 {
     private static final String CATALOG_NAME = "my_catalog";
@@ -79,7 +84,7 @@ public class TestSetSessionTask
     private SessionPropertyManager sessionPropertyManager;
     private ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         queryRunner = LocalQueryRunner.builder(TEST_SESSION)
@@ -129,7 +134,7 @@ public class TestSetSessionTask
         }
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         queryRunner.close();
@@ -149,7 +154,7 @@ public class TestSetSessionTask
         testSetSession("bar", new StringLiteral("baz"), "baz");
         testSetSession("bar",
                 new TestingFunctionResolution(transactionManager, plannerContext)
-                        .functionCallBuilder(QualifiedName.of("concat"))
+                        .functionCallBuilder("concat")
                         .addArgument(VARCHAR, new StringLiteral("ban"))
                         .addArgument(VARCHAR, new StringLiteral("ana"))
                         .build(),
@@ -180,7 +185,7 @@ public class TestSetSessionTask
     public void testSetSessionWithParameters()
     {
         FunctionCall functionCall = new TestingFunctionResolution(transactionManager, plannerContext)
-                .functionCallBuilder(QualifiedName.of("concat"))
+                .functionCallBuilder("concat")
                 .addArgument(VARCHAR, new StringLiteral("ban"))
                 .addArgument(VARCHAR, new Parameter(0))
                 .build();
@@ -199,7 +204,7 @@ public class TestSetSessionTask
                 Optional.empty(),
                 format("set %s = 'old_value'", qualifiedPropName),
                 Optional.empty(),
-                TEST_SESSION,
+                testSession(),
                 URI.create("fake://uri"),
                 new ResourceGroupId("test"),
                 false,
@@ -208,6 +213,7 @@ public class TestSetSessionTask
                 executor,
                 metadata,
                 WarningCollector.NOOP,
+                createPlanOptimizersStatsCollector(),
                 Optional.empty(),
                 true,
                 new NodeVersion("test"));

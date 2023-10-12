@@ -19,8 +19,7 @@ import io.trino.metadata.FunctionBundle;
 import io.trino.metadata.InternalFunctionBundle;
 import io.trino.tpch.TpchTable;
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Set;
@@ -244,47 +243,38 @@ public abstract class AbstractTestQueries
         assertQuery("SELECT orderkey FROM orders WHERE totalprice IN (1, 2, 3)");
     }
 
-    @Test(dataProvider = "largeInValuesCount")
-    public void testLargeIn(int valuesCount)
+    @Test
+    public void testLargeIn()
     {
-        String longValues = range(0, valuesCount)
-                .mapToObj(Integer::toString)
-                .collect(joining(", "));
-        assertQuery("SELECT orderkey FROM orders WHERE orderkey IN (" + longValues + ")");
-        assertQuery("SELECT orderkey FROM orders WHERE orderkey NOT IN (" + longValues + ")");
+        for (int count : largeInValuesCountData()) {
+            String longValues = range(0, count)
+                    .mapToObj(Integer::toString)
+                    .collect(joining(", "));
+            assertQuery("SELECT orderkey FROM orders WHERE orderkey IN (" + longValues + ")");
+            assertQuery("SELECT orderkey FROM orders WHERE orderkey NOT IN (" + longValues + ")");
 
-        assertQuery("SELECT orderkey FROM orders WHERE orderkey IN (mod(1000, orderkey), " + longValues + ")");
-        assertQuery("SELECT orderkey FROM orders WHERE orderkey NOT IN (mod(1000, orderkey), " + longValues + ")");
+            assertQuery("SELECT orderkey FROM orders WHERE orderkey IN (mod(1000, orderkey), " + longValues + ")");
+            assertQuery("SELECT orderkey FROM orders WHERE orderkey NOT IN (mod(1000, orderkey), " + longValues + ")");
+        }
     }
 
-    @DataProvider
-    public Object[][] largeInValuesCount()
+    protected List<Integer> largeInValuesCountData()
     {
-        return largeInValuesCountData();
-    }
-
-    protected Object[][] largeInValuesCountData()
-    {
-        return new Object[][] {
-                {200},
-                {500},
-                {1000},
-                {5000}
-        };
+        return ImmutableList.of(200, 500, 1000, 5000);
     }
 
     @Test
     public void testShowSchemas()
     {
         MaterializedResult result = computeActual("SHOW SCHEMAS");
-        assertTrue(result.getOnlyColumnAsSet().containsAll(ImmutableSet.of(getSession().getSchema().get(), INFORMATION_SCHEMA)));
+        assertThat(result.getOnlyColumnAsSet()).contains(getSession().getSchema().get(), INFORMATION_SCHEMA);
     }
 
     @Test
     public void testShowSchemasFrom()
     {
         MaterializedResult result = computeActual(format("SHOW SCHEMAS FROM %s", getSession().getCatalog().get()));
-        assertTrue(result.getOnlyColumnAsSet().containsAll(ImmutableSet.of(getSession().getSchema().get(), INFORMATION_SCHEMA)));
+        assertThat(result.getOnlyColumnAsSet()).contains(getSession().getSchema().get(), INFORMATION_SCHEMA);
     }
 
     @Test
@@ -305,7 +295,7 @@ public abstract class AbstractTestQueries
             Set<Object> allSchemas = computeActual("SHOW SCHEMAS").getOnlyColumnAsSet();
             assertEquals(allSchemas, computeActual("SHOW SCHEMAS LIKE '%_%'").getOnlyColumnAsSet());
             Set<Object> result = computeActual("SHOW SCHEMAS LIKE '%$_%' ESCAPE '$'").getOnlyColumnAsSet();
-            verify(allSchemas.stream().anyMatch(schema -> ((String) schema).contains("_")),
+            verify(allSchemas.stream().anyMatch(schema -> !((String) schema).contains("_")),
                     "This test expects at least one schema without underscore in it's name. Satisfy this assumption or override the test.");
             assertThat(result)
                     .isSubsetOf(allSchemas)
@@ -501,5 +491,11 @@ public abstract class AbstractTestQueries
     {
         assertQuery("SELECT * FROM (SELECT count(*) FROM orders) WHERE 0=1");
         assertQuery("SELECT * FROM (SELECT count(*) FROM orders) WHERE null");
+    }
+
+    @Test
+    public void testUnionAllAboveBroadcastJoin()
+    {
+        assertQuery("SELECT COUNT(*) FROM region r JOIN (SELECT nationkey FROM nation UNION ALL SELECT nationkey as key FROM nation) n ON r.regionkey = n.nationkey", "VALUES 10");
     }
 }

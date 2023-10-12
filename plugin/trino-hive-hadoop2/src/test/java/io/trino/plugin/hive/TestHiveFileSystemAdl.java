@@ -19,8 +19,8 @@ import io.trino.hdfs.DynamicHdfsConfiguration;
 import io.trino.hdfs.HdfsConfig;
 import io.trino.hdfs.HdfsConfiguration;
 import io.trino.hdfs.HdfsConfigurationInitializer;
-import io.trino.plugin.hive.azure.HiveAzureConfig;
-import io.trino.plugin.hive.azure.TrinoAzureConfigurationInitializer;
+import io.trino.hdfs.azure.HiveAzureConfig;
+import io.trino.hdfs.azure.TrinoAzureConfigurationInitializer;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.testng.annotations.BeforeClass;
@@ -73,7 +73,7 @@ public class TestHiveFileSystemAdl
         this.refreshUrl = refreshUrl;
         this.testDirectory = testDirectory;
 
-        super.setup(host, port, databaseName, false, createHdfsConfiguration());
+        super.setup(host, port, databaseName, createHdfsConfiguration());
     }
 
     private HdfsConfiguration createHdfsConfiguration()

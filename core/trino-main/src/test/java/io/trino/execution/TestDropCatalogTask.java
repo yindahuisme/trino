@@ -23,9 +23,10 @@ import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.sql.tree.DropCatalog;
 import io.trino.sql.tree.Identifier;
 import io.trino.testing.LocalQueryRunner;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.net.URI;
 import java.util.Optional;
@@ -33,26 +34,29 @@ import java.util.Optional;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
+import static io.trino.testing.TestingSession.testSession;
 import static java.util.Collections.emptyList;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestDropCatalogTask
 {
     private static final String TEST_CATALOG = "test_catalog";
 
     protected LocalQueryRunner queryRunner;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         queryRunner = LocalQueryRunner.create(TEST_SESSION);
         queryRunner.registerCatalogFactory(new TpchConnectorFactory());
     }
 
-    @AfterMethod
+    @AfterEach
     public void tearDown()
     {
         if (queryRunner != null) {
@@ -101,7 +105,7 @@ public class TestDropCatalogTask
                 Optional.empty(),
                 "test",
                 Optional.empty(),
-                queryRunner.getDefaultSession(),
+                testSession(queryRunner.getDefaultSession()),
                 URI.create("fake://uri"),
                 new ResourceGroupId("test"),
                 false,
@@ -110,6 +114,7 @@ public class TestDropCatalogTask
                 directExecutor(),
                 queryRunner.getMetadata(),
                 WarningCollector.NOOP,
+                createPlanOptimizersStatsCollector(),
                 Optional.empty(),
                 true,
                 new NodeVersion("test"));

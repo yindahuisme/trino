@@ -15,6 +15,7 @@ package io.trino.spi.block;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -24,7 +25,6 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.testng.annotations.Test;
 
 import java.util.Optional;
 import java.util.Random;
@@ -114,10 +114,7 @@ public class BenchmarkCopyPositions
                     generatedValues[position] = null;
                 }
                 else {
-                    int length = random.nextInt(380) + 20;
-                    byte[] buffer = new byte[length];
-                    random.nextBytes(buffer);
-                    generatedValues[position] = Slices.wrappedBuffer(buffer);
+                    generatedValues[position] = Slices.random(random.nextInt(380) + 20);
                 }
             }
             return generatedValues;
@@ -135,13 +132,13 @@ public class BenchmarkCopyPositions
 
         private static BlockBuilder createBlockBuilderWithValues(Slice[] generatedValues)
         {
-            BlockBuilder blockBuilder = new VariableWidthBlockBuilder(null, generatedValues.length, 32 * generatedValues.length);
+            VariableWidthBlockBuilder blockBuilder = new VariableWidthBlockBuilder(null, generatedValues.length, 32 * generatedValues.length);
             for (Slice value : generatedValues) {
                 if (value == null) {
                     blockBuilder.appendNull();
                 }
                 else {
-                    blockBuilder.writeBytes(value, 0, value.length()).closeEntry();
+                    blockBuilder.writeEntry(value);
                 }
             }
             return blockBuilder;

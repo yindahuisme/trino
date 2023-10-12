@@ -25,9 +25,9 @@ import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.DictionaryId;
 import io.trino.spi.block.MapHashTables;
-import io.trino.spi.block.SingleRowBlockWriter;
 import io.trino.spi.block.TestingBlockEncodingSerde;
-import org.testng.annotations.Test;
+import io.trino.spi.block.VariableWidthBlockBuilder;
+import io.trino.spi.type.Type;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Array;
@@ -56,7 +56,6 @@ import static org.testng.Assert.assertNotSame;
 import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 
-@Test
 public abstract class AbstractTestBlock
 {
     private static final BlockEncodingSerde BLOCK_ENCODING_SERDE = new TestingBlockEncodingSerde(TESTING_TYPE_MANAGER::getType);
@@ -97,7 +96,7 @@ public abstract class AbstractTestBlock
                     continue;
                 }
                 Class<?> type = field.getType();
-                if (type.isPrimitive()) {
+                if (type.isPrimitive() || Type.class.isAssignableFrom(type)) {
                     continue;
                 }
 
@@ -114,10 +113,10 @@ public abstract class AbstractTestBlock
                         retainedSize += BlockBuilderStatus.INSTANCE_SIZE;
                     }
                 }
-                else if (type == BlockBuilder.class || type == Block.class) {
+                else if (type == Block.class) {
                     retainedSize += ((Block) field.get(block)).getRetainedSizeInBytes();
                 }
-                else if (type == BlockBuilder[].class || type == Block[].class) {
+                else if (type == Block[].class) {
                     Block[] blocks = (Block[]) field.get(block);
                     for (Block innerBlock : blocks) {
                         assertRetainedSize(innerBlock);
@@ -126,9 +125,6 @@ public abstract class AbstractTestBlock
                 }
                 else if (type == SliceOutput.class) {
                     retainedSize += ((SliceOutput) field.get(block)).getRetainedSize();
-                }
-                else if (type == SingleRowBlockWriter.class) {
-                    retainedSize += SingleRowBlockWriter.INSTANCE_SIZE;
                 }
                 else if (type == int[].class) {
                     retainedSize += sizeOf((int[]) field.get(block));
@@ -152,10 +148,14 @@ public abstract class AbstractTestBlock
                     retainedSize += ((MapHashTables) field.get(block)).getRetainedSizeInBytes();
                 }
                 else if (type == MethodHandle.class) {
-                    // MethodHandles are only used in MapBlock/MapBlockBuilder,
+                    // MethodHandles are only used in MapBlock
                     // and they are shared among blocks created by the same MapType.
                     // So we don't account for the memory held onto by MethodHandle instances.
                     // Otherwise, we will be counting it multiple times.
+                }
+                else if (field.getName().equals("fieldBlocksList")) {
+                    // RowBlockBuilder fieldBlockBuildersList is a simple wrapper around the
+                    // array already accounted for in the instance
                 }
                 else {
                     throw new IllegalArgumentException(format("Unknown type encountered: %s", type));
@@ -346,9 +346,8 @@ public abstract class AbstractTestBlock
             assertTrue(block.equals(position, offset, expectedBlock, 0, offset, 3));
             assertEquals(block.compareTo(position, offset, 3, expectedBlock, 0, offset, 3), 0);
 
-            BlockBuilder blockBuilder = VARBINARY.createBlockBuilder(null, 1);
-            block.writeBytesTo(position, offset, 3, blockBuilder);
-            blockBuilder.closeEntry();
+            VariableWidthBlockBuilder blockBuilder = VARBINARY.createBlockBuilder(null, 1);
+            blockBuilder.writeEntry(block.getSlice(position, offset, 3));
             Block segment = blockBuilder.build();
 
             assertTrue(block.equals(position, offset, segment, 0, 0, 3));
@@ -462,13 +461,11 @@ public abstract class AbstractTestBlock
         assertEquals(block.getPositionCount(), expectedSliceValues.length);
         for (int i = 0; i < block.getPositionCount(); i++) {
             int expectedSize = expectedSliceValues[i] == null ? 0 : expectedSliceValues[i].length();
-            assertEquals(blockBuilder.getEstimatedDataSizeForStats(i), expectedSize);
             assertEquals(block.getEstimatedDataSizeForStats(i), expectedSize);
         }
 
-        BlockBuilder nullValueBlockBuilder = blockBuilder.newBlockBuilderLike(null).appendNull();
-        assertEquals(nullValueBlockBuilder.getEstimatedDataSizeForStats(0), 0);
-        assertEquals(nullValueBlockBuilder.build().getEstimatedDataSizeForStats(0), 0);
+        Block nullValueBlock = blockBuilder.newBlockBuilderLike(null).appendNull().build();
+        assertEquals(nullValueBlock.getEstimatedDataSizeForStats(0), 0);
     }
 
     protected static void testCopyRegionCompactness(Block block)

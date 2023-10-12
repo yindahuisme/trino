@@ -15,6 +15,7 @@ package io.trino.plugin.deltalake.transactionlog;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.parquet.ParquetReaderOptions;
@@ -27,10 +28,10 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.TypeManager;
-import org.apache.hadoop.fs.Path;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -43,6 +44,7 @@ import static io.trino.plugin.deltalake.transactionlog.TransactionLogParser.read
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogDir;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.ADD;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.METADATA;
+import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.PROTOCOL;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -55,7 +57,7 @@ public class TableSnapshot
     private final Optional<LastCheckpoint> lastCheckpoint;
     private final SchemaTableName table;
     private final TransactionLogTail logTail;
-    private final Path tableLocation;
+    private final String tableLocation;
     private final ParquetReaderOptions parquetReaderOptions;
     private final boolean checkpointRowStatisticsWritingEnabled;
     private final int domainCompactionThreshold;
@@ -66,7 +68,7 @@ public class TableSnapshot
             SchemaTableName table,
             Optional<LastCheckpoint> lastCheckpoint,
             TransactionLogTail logTail,
-            Path tableLocation,
+            String tableLocation,
             ParquetReaderOptions parquetReaderOptions,
             boolean checkpointRowStatisticsWritingEnabled,
             int domainCompactionThreshold)
@@ -82,14 +84,14 @@ public class TableSnapshot
 
     public static TableSnapshot load(
             SchemaTableName table,
+            Optional<LastCheckpoint> lastCheckpoint,
             TrinoFileSystem fileSystem,
-            Path tableLocation,
+            String tableLocation,
             ParquetReaderOptions parquetReaderOptions,
             boolean checkpointRowStatisticsWritingEnabled,
             int domainCompactionThreshold)
             throws IOException
     {
-        Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(fileSystem, tableLocation);
         Optional<Long> lastCheckpointVersion = lastCheckpoint.map(LastCheckpoint::getVersion);
         TransactionLogTail transactionLogTail = TransactionLogTail.loadNewTail(fileSystem, tableLocation, lastCheckpointVersion);
 
@@ -103,21 +105,30 @@ public class TableSnapshot
                 domainCompactionThreshold);
     }
 
-    public Optional<TableSnapshot> getUpdatedSnapshot(TrinoFileSystem fileSystem)
+    public Optional<TableSnapshot> getUpdatedSnapshot(TrinoFileSystem fileSystem, Optional<Long> toVersion)
             throws IOException
     {
-        Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(fileSystem, tableLocation);
-        long lastCheckpointVersion = lastCheckpoint.map(LastCheckpoint::getVersion).orElse(0L);
-        long cachedLastCheckpointVersion = getLastCheckpointVersion().orElse(0L);
+        if (toVersion.isEmpty()) {
+            // Load any newer table snapshot
 
-        Optional<TransactionLogTail> updatedLogTail;
-        if (cachedLastCheckpointVersion == lastCheckpointVersion) {
-            updatedLogTail = logTail.getUpdatedTail(fileSystem, tableLocation);
-        }
-        else {
-            updatedLogTail = Optional.of(TransactionLogTail.loadNewTail(fileSystem, tableLocation, Optional.of(lastCheckpointVersion)));
+            Optional<LastCheckpoint> lastCheckpoint = readLastCheckpoint(fileSystem, tableLocation);
+            if (lastCheckpoint.isPresent()) {
+                long ourCheckpointVersion = getLastCheckpointVersion().orElse(0L);
+                if (ourCheckpointVersion != lastCheckpoint.get().getVersion()) {
+                    // There is a new checkpoint in the table, load anew
+                    return Optional.of(TableSnapshot.load(
+                            table,
+                            lastCheckpoint,
+                            fileSystem,
+                            tableLocation,
+                            parquetReaderOptions,
+                            checkpointRowStatisticsWritingEnabled,
+                            domainCompactionThreshold));
+                }
+            }
         }
 
+        Optional<TransactionLogTail> updatedLogTail = logTail.getUpdatedTail(fileSystem, tableLocation, toVersion);
         return updatedLogTail.map(transactionLogTail -> new TableSnapshot(
                 table,
                 lastCheckpoint,
@@ -143,7 +154,7 @@ public class TableSnapshot
         return cachedMetadata;
     }
 
-    public Path getTableLocation()
+    public String getTableLocation()
     {
         return tableLocation;
     }
@@ -156,6 +167,11 @@ public class TableSnapshot
     public List<DeltaLakeTransactionLogEntry> getJsonTransactionLogEntries()
     {
         return logTail.getFileEntries();
+    }
+
+    public List<Transaction> getTransactions()
+    {
+        return logTail.getTransactions();
     }
 
     public Stream<DeltaLakeTransactionLogEntry> getCheckpointTransactionLogEntries(
@@ -174,30 +190,32 @@ public class TableSnapshot
         LastCheckpoint checkpoint = lastCheckpoint.get();
         // Add entries contain statistics. When struct statistics are used the format of the Parquet file depends on the schema. It is important to use the schema at the time
         // of the Checkpoint creation, in case the schema has evolved since it was written.
-        Optional<MetadataEntry> metadataEntry = entryTypes.contains(ADD) ?
-                Optional.of(getCheckpointMetadataEntry(
-                        session,
-                        checkpointSchemaManager,
-                        typeManager,
-                        fileSystem,
-                        stats,
-                        checkpoint)) :
-                Optional.empty();
+        Optional<MetadataAndProtocolEntry> metadataAndProtocol = Optional.empty();
+        if (entryTypes.contains(ADD)) {
+            metadataAndProtocol = Optional.of(getCheckpointMetadataAndProtocolEntries(
+                    session,
+                    checkpointSchemaManager,
+                    typeManager,
+                    fileSystem,
+                    stats,
+                    checkpoint));
+        }
 
         Stream<DeltaLakeTransactionLogEntry> resultStream = Stream.empty();
-        for (Path checkpointPath : getCheckpointPartPaths(checkpoint)) {
-            TrinoInputFile checkpointFile = fileSystem.newInputFile(checkpointPath.toString());
+        for (Location checkpointPath : getCheckpointPartPaths(checkpoint)) {
+            TrinoInputFile checkpointFile = fileSystem.newInputFile(checkpointPath);
             resultStream = Stream.concat(
                     resultStream,
-                    getCheckpointTransactionLogEntries(
+                    stream(getCheckpointTransactionLogEntries(
                             session,
                             entryTypes,
-                            metadataEntry,
+                            metadataAndProtocol.map(MetadataAndProtocolEntry::metadataEntry),
+                            metadataAndProtocol.map(MetadataAndProtocolEntry::protocolEntry),
                             checkpointSchemaManager,
                             typeManager,
                             stats,
                             checkpoint,
-                            checkpointFile));
+                            checkpointFile)));
         }
         return resultStream;
     }
@@ -207,10 +225,11 @@ public class TableSnapshot
         return lastCheckpoint.map(LastCheckpoint::getVersion);
     }
 
-    private Stream<DeltaLakeTransactionLogEntry> getCheckpointTransactionLogEntries(
+    private Iterator<DeltaLakeTransactionLogEntry> getCheckpointTransactionLogEntries(
             ConnectorSession session,
             Set<CheckpointEntryIterator.EntryType> entryTypes,
             Optional<MetadataEntry> metadataEntry,
+            Optional<ProtocolEntry> protocolEntry,
             CheckpointSchemaManager checkpointSchemaManager,
             TypeManager typeManager,
             FileFormatDataSourceStats stats,
@@ -225,7 +244,7 @@ public class TableSnapshot
         catch (FileNotFoundException e) {
             throw new TrinoException(DELTA_LAKE_INVALID_SCHEMA, format("%s mentions a non-existent checkpoint file for table: %s", checkpoint, table));
         }
-        return stream(new CheckpointEntryIterator(
+        return new CheckpointEntryIterator(
                 checkpointFile,
                 session,
                 fileSize,
@@ -233,13 +252,14 @@ public class TableSnapshot
                 typeManager,
                 entryTypes,
                 metadataEntry,
+                protocolEntry,
                 stats,
                 parquetReaderOptions,
                 checkpointRowStatisticsWritingEnabled,
-                domainCompactionThreshold));
+                domainCompactionThreshold);
     }
 
-    private MetadataEntry getCheckpointMetadataEntry(
+    private MetadataAndProtocolEntry getCheckpointMetadataAndProtocolEntries(
             ConnectorSession session,
             CheckpointSchemaManager checkpointSchemaManager,
             TypeManager typeManager,
@@ -248,36 +268,59 @@ public class TableSnapshot
             LastCheckpoint checkpoint)
             throws IOException
     {
-        for (Path checkpointPath : getCheckpointPartPaths(checkpoint)) {
-            TrinoInputFile checkpointFile = fileSystem.newInputFile(checkpointPath.toString());
-            Stream<DeltaLakeTransactionLogEntry> metadataEntries = getCheckpointTransactionLogEntries(
+        MetadataEntry metadata = null;
+        ProtocolEntry protocol = null;
+        for (Location checkpointPath : getCheckpointPartPaths(checkpoint)) {
+            TrinoInputFile checkpointFile = fileSystem.newInputFile(checkpointPath);
+            Iterator<DeltaLakeTransactionLogEntry> entries = getCheckpointTransactionLogEntries(
                     session,
-                    ImmutableSet.of(METADATA),
+                    ImmutableSet.of(METADATA, PROTOCOL),
+                    Optional.empty(),
                     Optional.empty(),
                     checkpointSchemaManager,
                     typeManager,
                     stats,
                     checkpoint,
                     checkpointFile);
-            Optional<DeltaLakeTransactionLogEntry> metadataEntry = metadataEntries.findFirst();
-            if (metadataEntry.isPresent()) {
-                return metadataEntry.get().getMetaData();
+            while (entries.hasNext()) {
+                DeltaLakeTransactionLogEntry entry = entries.next();
+                if (metadata == null && entry.getMetaData() != null) {
+                    metadata = entry.getMetaData();
+                }
+                if (protocol == null && entry.getProtocol() != null) {
+                    protocol = entry.getProtocol();
+                }
+                if (metadata != null && protocol != null) {
+                    break;
+                }
             }
         }
-        throw new TrinoException(DELTA_LAKE_BAD_DATA, "Checkpoint found without metadata entry: " + checkpoint);
+        if (metadata == null || protocol == null) {
+            throw new TrinoException(DELTA_LAKE_BAD_DATA, "Checkpoint found without metadata and protocol entry: " + checkpoint);
+        }
+        return new MetadataAndProtocolEntry(metadata, protocol);
     }
 
-    private List<Path> getCheckpointPartPaths(LastCheckpoint checkpoint)
+    private record MetadataAndProtocolEntry(MetadataEntry metadataEntry, ProtocolEntry protocolEntry)
     {
-        Path transactionLogDir = getTransactionLogDir(tableLocation);
-        ImmutableList.Builder<Path> paths = ImmutableList.builder();
+        private MetadataAndProtocolEntry
+        {
+            requireNonNull(metadataEntry, "metadataEntry is null");
+            requireNonNull(protocolEntry, "protocolEntry is null");
+        }
+    }
+
+    private List<Location> getCheckpointPartPaths(LastCheckpoint checkpoint)
+    {
+        Location transactionLogDir = Location.of(getTransactionLogDir(tableLocation));
+        ImmutableList.Builder<Location> paths = ImmutableList.builder();
         if (checkpoint.getParts().isEmpty()) {
-            paths.add(new Path(transactionLogDir, format("%020d.checkpoint.parquet", checkpoint.getVersion())));
+            paths.add(transactionLogDir.appendPath("%020d.checkpoint.parquet".formatted(checkpoint.getVersion())));
         }
         else {
             int partsCount = checkpoint.getParts().get();
             for (int i = 1; i <= partsCount; i++) {
-                paths.add(new Path(transactionLogDir, format("%020d.checkpoint.%010d.%010d.parquet", checkpoint.getVersion(), i, partsCount)));
+                paths.add(transactionLogDir.appendPath("%020d.checkpoint.%010d.%010d.parquet".formatted(checkpoint.getVersion(), i, partsCount)));
             }
         }
         return paths.build();

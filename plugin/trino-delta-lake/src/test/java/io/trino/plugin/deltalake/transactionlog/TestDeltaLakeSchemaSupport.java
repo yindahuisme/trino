@@ -39,13 +39,17 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.io.Resources.getResource;
 import static io.trino.plugin.deltalake.DeltaLakeColumnType.REGULAR;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.serializeColumnType;
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.serializeSchemaAsJson;
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeSchemaSupport.serializeStatsAsJson;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -58,13 +62,14 @@ import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_SECONDS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_SECONDS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.IntervalDayTimeType.INTERVAL_DAY_TIME;
 import static io.trino.type.IntervalYearMonthType.INTERVAL_YEAR_MONTH;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.testng.Assert.assertEquals;
 
 public class TestDeltaLakeSchemaSupport
@@ -164,6 +169,28 @@ public class TestDeltaLakeSchemaSupport
     }
 
     @Test
+    public void testSerializeStatisticsWithNullValuesAsJson()
+            throws JsonProcessingException
+    {
+        Map<String, Object> minValues = new HashMap<>();
+        Map<String, Object> maxValues = new HashMap<>();
+
+        // Case where the file contains one record and the column `c1` is a null in the record.
+        minValues.put("c1", null);
+        maxValues.put("c1", null);
+        minValues.put("c2", 10);
+        maxValues.put("c2", 26);
+
+        assertEquals(serializeStatsAsJson(
+                        new DeltaLakeJsonFileStatistics(
+                                Optional.of(1L),
+                                Optional.of(minValues),
+                                Optional.of(maxValues),
+                                Optional.of(ImmutableMap.of("c1", 1L, "c2", 0L)))),
+                "{\"numRecords\":1,\"minValues\":{\"c2\":10},\"maxValues\":{\"c2\":26},\"nullCount\":{\"c1\":1,\"c2\":0}}");
+    }
+
+    @Test
     public void testSerializeSchemaAsJson()
             throws Exception
     {
@@ -173,7 +200,8 @@ public class TestDeltaLakeSchemaSupport
                 OptionalInt.empty(),
                 "arr",
                 new ArrayType(new ArrayType(INTEGER)),
-                REGULAR);
+                REGULAR,
+                Optional.empty());
 
         DeltaLakeColumnHandle structColumn = new DeltaLakeColumnHandle(
                 "str",
@@ -189,7 +217,8 @@ public class TestDeltaLakeSchemaSupport
                         new RowType.Field(Optional.of("s2"), RowType.from(ImmutableList.of(
                                 new RowType.Field(Optional.of("i1"), INTEGER),
                                 new RowType.Field(Optional.of("d2"), DecimalType.createDecimalType(38, 0))))))),
-                REGULAR);
+                REGULAR,
+                Optional.empty());
 
         TypeOperators typeOperators = new TypeOperators();
         DeltaLakeColumnHandle mapColumn = new DeltaLakeColumnHandle(
@@ -204,12 +233,21 @@ public class TestDeltaLakeSchemaSupport
                         INTEGER,
                         new MapType(INTEGER, INTEGER, typeOperators),
                         typeOperators),
-                REGULAR);
+                REGULAR,
+                Optional.empty());
 
         URL expected = getResource("io/trino/plugin/deltalake/transactionlog/schema/nested_schema.json");
         ObjectMapper objectMapper = new ObjectMapper();
 
-        String jsonEncoding = serializeSchemaAsJson(ImmutableList.of(arrayColumn, structColumn, mapColumn), ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of());
+        List<DeltaLakeColumnHandle> columnHandles = ImmutableList.of(arrayColumn, structColumn, mapColumn);
+        ImmutableList.Builder<String> columnNames = ImmutableList.builderWithExpectedSize(columnHandles.size());
+        ImmutableMap.Builder<String, Object> columnTypes = ImmutableMap.builderWithExpectedSize(columnHandles.size());
+        for (DeltaLakeColumnHandle column : columnHandles) {
+            columnNames.add(column.getColumnName());
+            columnTypes.put(column.getColumnName(), serializeColumnType(ColumnMappingMode.NONE, new AtomicInteger(), column.getBaseType()));
+        }
+
+        String jsonEncoding = serializeSchemaAsJson(columnNames.build(), columnTypes.buildOrThrow(), ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of());
         assertThat(objectMapper.readTree(jsonEncoding)).isEqualTo(objectMapper.readTree(expected));
     }
 
@@ -223,11 +261,16 @@ public class TestDeltaLakeSchemaSupport
         List<ColumnMetadata> schema = DeltaLakeSchemaSupport.getColumnMetadata(json, typeManager, ColumnMappingMode.NONE).stream()
                 .map(DeltaLakeColumnMetadata::getColumnMetadata)
                 .collect(toImmutableList());
-        List<DeltaLakeColumnHandle> columnHandles = schema.stream()
-                .map(metadata -> new DeltaLakeColumnHandle(metadata.getName(), metadata.getType(), OptionalInt.empty(), metadata.getName(), metadata.getType(), REGULAR))
-                .collect(toImmutableList());
+
+        ImmutableList.Builder<String> columnNames = ImmutableList.builderWithExpectedSize(schema.size());
+        ImmutableMap.Builder<String, Object> columnTypes = ImmutableMap.builderWithExpectedSize(schema.size());
+        for (ColumnMetadata column : schema) {
+            columnNames.add(column.getName());
+            columnTypes.put(column.getName(), serializeColumnType(ColumnMappingMode.NONE, new AtomicInteger(), column.getType()));
+        }
+
         ObjectMapper objectMapper = new ObjectMapper();
-        String jsonEncoding = serializeSchemaAsJson(columnHandles, ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of());
+        String jsonEncoding = serializeSchemaAsJson(columnNames.build(), columnTypes.buildOrThrow(), ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of());
         assertThat(objectMapper.readTree(jsonEncoding)).isEqualTo(objectMapper.readTree(expected));
     }
 
@@ -252,7 +295,10 @@ public class TestDeltaLakeSchemaSupport
                 {DATE},
                 {VARCHAR},
                 {DecimalType.createDecimalType(3)},
-                {TIMESTAMP_TZ_MILLIS}};
+                {TIMESTAMP_TZ_MILLIS},
+                {new MapType(TIMESTAMP_TZ_MILLIS, TIMESTAMP_TZ_MILLIS, new TypeOperators())},
+                {RowType.anonymous(ImmutableList.of(TIMESTAMP_TZ_MILLIS))},
+                {new ArrayType(TIMESTAMP_TZ_MILLIS)}};
     }
 
     @Test(dataProvider = "unsupportedTypes")
@@ -275,15 +321,15 @@ public class TestDeltaLakeSchemaSupport
     @Test(dataProvider = "unsupportedNestedTimestamp")
     public void testTimestampNestedInStructTypeIsNotSupported(Type type)
     {
-        assertThatCode(() -> DeltaLakeSchemaSupport.validateType(type)).hasMessage("Nested TIMESTAMP types are not supported, invalid type: " + type);
+        assertThatCode(() -> DeltaLakeSchemaSupport.validateType(type)).hasMessage("Unsupported type: timestamp(0) with time zone");
     }
 
     @DataProvider(name = "unsupportedNestedTimestamp")
     public static Object[][] unsupportedNestedTimestamp()
     {
         return new Object[][] {
-                {new MapType(TIMESTAMP_TZ_MILLIS, TIMESTAMP_TZ_MILLIS, new TypeOperators())},
-                {RowType.anonymous(ImmutableList.of(TIMESTAMP_TZ_MILLIS))},
-                {new ArrayType(TIMESTAMP_TZ_MILLIS)}};
+                {new MapType(TIMESTAMP_TZ_SECONDS, TIMESTAMP_TZ_SECONDS, new TypeOperators())},
+                {RowType.anonymous(ImmutableList.of(TIMESTAMP_TZ_SECONDS))},
+                {new ArrayType(TIMESTAMP_TZ_SECONDS)}};
     }
 }

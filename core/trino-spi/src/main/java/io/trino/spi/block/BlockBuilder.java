@@ -13,76 +13,28 @@
  */
 package io.trino.spi.block;
 
-import io.airlift.slice.Slice;
-
 import static io.trino.spi.block.BlockUtil.calculateBlockResetSize;
 
 public interface BlockBuilder
-        extends Block
 {
     /**
-     * Write a byte to the current entry;
+     * Returns the number of positions in this block builder.
      */
-    default BlockBuilder writeByte(int value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    int getPositionCount();
 
     /**
-     * Write a short to the current entry;
+     * Returns the size of this block as if it was compacted, ignoring any over-allocations
+     * and any unloaded nested blocks.
+     * For example, in dictionary blocks, this only counts each dictionary entry once,
+     * rather than each time a value is referenced.
      */
-    default BlockBuilder writeShort(int value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
+    long getSizeInBytes();
 
     /**
-     * Write a int to the current entry;
+     * Returns the retained size of this block in memory, including over-allocations.
+     * This method is called from the innermost execution loop and must be fast.
      */
-    default BlockBuilder writeInt(int value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Write a long to the current entry;
-     */
-    default BlockBuilder writeLong(long value)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Write a byte sequences to the current entry;
-     */
-    default BlockBuilder writeBytes(Slice source, int sourceIndex, int length)
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Return a writer to the current entry. The caller can operate on the returned caller to incrementally build the object. This is generally more efficient than
-     * building the object elsewhere and call writeObject afterwards because a large chunk of memory could potentially be unnecessarily copied in this process.
-     */
-    default BlockBuilder beginBlockEntry()
-    {
-        throw new UnsupportedOperationException(getClass().getName());
-    }
-
-    /**
-     * Create a new block from the current materialized block by keeping the same elements
-     * only with respect to {@code visiblePositions}.
-     */
-    @Override
-    default Block getPositions(int[] visiblePositions, int offset, int length)
-    {
-        return build().getPositions(visiblePositions, offset, length);
-    }
-
-    /**
-     * Close the current entry.
-     */
-    BlockBuilder closeEntry();
+    long getRetainedSizeInBytes();
 
     /**
      * Appends a null value to the block.
@@ -102,15 +54,5 @@ public interface BlockBuilder
     default BlockBuilder newBlockBuilderLike(BlockBuilderStatus blockBuilderStatus)
     {
         return newBlockBuilderLike(calculateBlockResetSize(getPositionCount()), blockBuilderStatus);
-    }
-
-    /**
-     * This method is not expected to be implemented for {@code BlockBuilder} implementations, the method
-     * {@link BlockBuilder#appendNull} should be used instead.
-     */
-    @Override
-    default Block copyWithAppendedNull()
-    {
-        throw new UnsupportedOperationException("BlockBuilder implementation does not support newBlockWithAppendedNull");
     }
 }

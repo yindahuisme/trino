@@ -25,6 +25,7 @@ import com.google.common.collect.SetMultimap;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.exchange.SpoolingExchangeInput;
 import io.trino.execution.TableExecuteContextManager;
 import io.trino.execution.scheduler.SplitAssigner.AssignmentResult;
@@ -42,11 +43,11 @@ import io.trino.split.RemoteSplit;
 import io.trino.split.SplitSource;
 import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNodeId;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
-
-import javax.annotation.concurrent.GuardedBy;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.RepeatedTest;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -78,14 +79,16 @@ import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
+@TestInstance(PER_CLASS)
 public class TestEventDrivenTaskSource
 {
     private static final int INVOCATION_COUNT = 20;
-    private static final long TIMEOUT = 60 * 1000;
+    private static final long TIMEOUT = 60;
 
     private static final PlanNodeId PLAN_NODE_1 = new PlanNodeId("plan-node-1");
     private static final PlanNodeId PLAN_NODE_2 = new PlanNodeId("plan-node-2");
@@ -100,13 +103,13 @@ public class TestEventDrivenTaskSource
 
     private ListeningScheduledExecutorService executor;
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
-        executor = listeningDecorator(newScheduledThreadPool(10, daemonThreadsNamed("dispatcher-query-%s")));
+        executor = listeningDecorator(newScheduledThreadPool(10, daemonThreadsNamed(getClass().getName())));
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         if (executor != null) {
@@ -115,7 +118,8 @@ public class TestEventDrivenTaskSource
         }
     }
 
-    @Test(invocationCount = INVOCATION_COUNT, timeOut = TIMEOUT)
+    @RepeatedTest(INVOCATION_COUNT)
+    @Timeout(TIMEOUT)
     public void testHappyPath()
             throws Exception
     {
@@ -240,7 +244,8 @@ public class TestEventDrivenTaskSource
                         .build());
     }
 
-    @Test(invocationCount = INVOCATION_COUNT, timeOut = TIMEOUT)
+    @RepeatedTest(INVOCATION_COUNT)
+    @Timeout(TIMEOUT)
     public void stressTest()
             throws Exception
     {
@@ -665,15 +670,15 @@ public class TestEventDrivenTaskSource
                 if (partitions.add(partition)) {
                     result.addPartition(new Partition(partition, new NodeRequirements(Optional.empty(), ImmutableSet.of())));
                     for (PlanNodeId finishedSource : finishedSources) {
-                        result.updatePartition(new PartitionUpdate(partition, finishedSource, ImmutableList.of(), true));
+                        result.updatePartition(new PartitionUpdate(partition, finishedSource, false, ImmutableList.of(), true));
                     }
                 }
-                result.updatePartition(new PartitionUpdate(partition, planNodeId, splits, noMoreSplits));
+                result.updatePartition(new PartitionUpdate(partition, planNodeId, true, splits, noMoreSplits));
             });
             if (noMoreSplits) {
                 finishedSources.add(planNodeId);
                 for (Integer partition : partitions) {
-                    result.updatePartition(new PartitionUpdate(partition, planNodeId, ImmutableList.of(), true));
+                    result.updatePartition(new PartitionUpdate(partition, planNodeId, false, ImmutableList.of(), true));
                 }
             }
             if (finishedSources.containsAll(allSources)) {

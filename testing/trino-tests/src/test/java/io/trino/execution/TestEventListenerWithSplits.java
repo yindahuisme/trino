@@ -35,7 +35,7 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
@@ -51,7 +51,6 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
-@Test(singleThreaded = true)
 public class TestEventListenerWithSplits
         extends AbstractTestQueryFramework
 {
@@ -164,7 +163,7 @@ public class TestEventListenerWithSplits
         assertEquals(statistics.getPhysicalInputRows(), expectedCompletedPositions);
         assertEquals(statistics.getProcessedInputBytes(), 0);
         assertEquals(statistics.getProcessedInputRows(), expectedCompletedPositions);
-        assertEquals(statistics.getInternalNetworkBytes(), 381);
+        assertEquals(statistics.getInternalNetworkBytes(), 261);
         assertEquals(statistics.getInternalNetworkRows(), 3);
         assertEquals(statistics.getTotalBytes(), 0);
         assertEquals(statistics.getOutputBytes(), 9);

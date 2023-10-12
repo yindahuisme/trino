@@ -111,7 +111,7 @@ public final class BytecodeUtils
 
         isNull.pushJavaDefault(returnType);
         String loadDefaultComment;
-        loadDefaultComment = format("loadJavaDefault(%s)", returnType.getName());
+        loadDefaultComment = "loadJavaDefault(" + returnType.getName() + ")";
 
         isNull.gotoLabel(label);
 
@@ -164,7 +164,7 @@ public final class BytecodeUtils
     {
         return generateInvocation(
                 scope,
-                resolvedFunction.getSignature().getName(),
+                resolvedFunction.getSignature().getName().getFunctionName(),
                 resolvedFunction.getFunctionNullability(),
                 invocationConvention -> functionManager.getScalarFunctionImplementation(resolvedFunction, invocationConvention),
                 arguments,
@@ -212,7 +212,7 @@ public final class BytecodeUtils
     {
         return generateFullInvocation(
                 scope,
-                resolvedFunction.getSignature().getName(),
+                resolvedFunction.getSignature().getName().getFunctionName(),
                 resolvedFunction.getFunctionNullability(),
                 resolvedFunction.getSignature().getArgumentTypes().stream()
                         .map(FunctionType.class::isInstance)
@@ -354,7 +354,7 @@ public final class BytecodeUtils
     private static InvocationArgumentConvention getPreferredArgumentConvention(BytecodeNode argument, int argumentCount, boolean nullable)
     {
         // a Java function can only have 255 arguments, so if the count is low use block position or boxed nullable as they are more efficient
-        if (argumentCount <= 100) {
+        if (argumentCount <= 64) {
             if (argument instanceof InputReferenceNode) {
                 return BLOCK_POSITION;
             }
@@ -445,7 +445,7 @@ public final class BytecodeUtils
 
     public static BytecodeExpression invoke(Binding binding, BoundSignature signature)
     {
-        return invoke(binding, signature.getName());
+        return invoke(binding, signature.getName().getFunctionName());
     }
 
     /**

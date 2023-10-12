@@ -21,19 +21,20 @@ import io.airlift.log.Logger;
 import io.trino.Session;
 import io.trino.filesystem.FileEntry;
 import io.trino.filesystem.FileIterator;
+import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
-import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
+import io.trino.metadata.InternalFunctionBundle;
 import io.trino.plugin.hive.metastore.Database;
 import io.trino.plugin.hive.metastore.glue.GlueHiveMetastore;
+import io.trino.plugin.iceberg.IcebergPlugin;
 import io.trino.plugin.iceberg.TestingIcebergConnectorFactory;
 import io.trino.spi.security.PrincipalType;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.LocalQueryRunner;
-import io.trino.testing.TestingConnectorSession;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
-import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,19 +45,21 @@ import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static com.google.common.reflect.Reflection.newProxy;
 import static com.google.inject.util.Modules.EMPTY_MODULE;
-import static io.trino.plugin.hive.HiveTestUtils.HDFS_ENVIRONMENT;
+import static io.trino.plugin.hive.HiveTestUtils.HDFS_FILE_SYSTEM_FACTORY;
 import static io.trino.plugin.hive.metastore.glue.GlueHiveMetastore.createTestingGlueHiveMetastore;
+import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 /*
  * The test currently uses AWS Default Credential Provider Chain,
  * See https://docs.aws.amazon.com/sdk-for-java/v1/developer-guide/credentials.html#credentials-default
  * on ways to set your AWS credentials which will be needed to run this test.
  */
-@Test(singleThreaded = true) // testException is a shared mutable state
+@TestInstance(PER_CLASS)
 public class TestIcebergGlueCreateTableFailure
         extends AbstractTestQueryFramework
 {
@@ -95,6 +98,10 @@ public class TestIcebergGlueCreateTableFailure
             return result;
         });
 
+        InternalFunctionBundle.InternalFunctionBundleBuilder functions = InternalFunctionBundle.builder();
+        new IcebergPlugin().getFunctions().forEach(functions::functions);
+        queryRunner.addFunctions(functions.build());
+
         queryRunner.createCatalog(
                 ICEBERG_CATALOG,
                 new TestingIcebergConnectorFactory(Optional.of(new TestingIcebergGlueCatalogModule(awsGlueAsyncAdapterProvider)), Optional.empty(), EMPTY_MODULE),
@@ -103,8 +110,8 @@ public class TestIcebergGlueCreateTableFailure
         dataDirectory = Files.createTempDirectory("test_iceberg_create_table_failure");
         dataDirectory.toFile().deleteOnExit();
 
-        glueHiveMetastore = createTestingGlueHiveMetastore(dataDirectory.toString());
-        fileSystem = new HdfsFileSystemFactory(HDFS_ENVIRONMENT).create(TestingConnectorSession.SESSION);
+        glueHiveMetastore = createTestingGlueHiveMetastore(dataDirectory);
+        fileSystem = HDFS_FILE_SYSTEM_FACTORY.create(SESSION);
 
         Database database = Database.builder()
                 .setDatabaseName(schemaName)
@@ -117,9 +124,8 @@ public class TestIcebergGlueCreateTableFailure
         return queryRunner;
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void cleanup()
-            throws IOException
     {
         try {
             if (glueHiveMetastore != null) {
@@ -165,12 +171,12 @@ public class TestIcebergGlueCreateTableFailure
     protected void assertMetadataLocation(String tableName, boolean shouldMetadataFileExist)
             throws Exception
     {
-        FileIterator fileIterator = fileSystem.listFiles(dataDirectory.toString());
+        FileIterator fileIterator = fileSystem.listFiles(Location.of(dataDirectory.toString()));
         String tableLocationPrefix = Path.of(dataDirectory.toString(), tableName).toString();
         boolean metadataFileFound = false;
         while (fileIterator.hasNext()) {
             FileEntry fileEntry = fileIterator.next();
-            String location = fileEntry.location();
+            String location = fileEntry.location().toString();
             if (location.startsWith(tableLocationPrefix) && location.endsWith(".metadata.json")) {
                 metadataFileFound = true;
                 break;

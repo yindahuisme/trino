@@ -18,11 +18,14 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheStats;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.UncheckedExecutionException;
+import com.google.inject.Inject;
 import io.airlift.jmx.CacheStatsMBean;
 import io.airlift.units.Duration;
-import io.trino.collect.cache.EvictableCacheBuilder;
+import io.trino.cache.EvictableCacheBuilder;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.jdbc.IdentityCacheMapping.IdentityCacheKey;
+import io.trino.plugin.jdbc.JdbcProcedureHandle.ProcedureQuery;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
@@ -43,8 +46,7 @@ import io.trino.spi.type.Type;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
-import javax.inject.Inject;
-
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -52,18 +54,18 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
-import java.util.function.Predicate;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
-import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.cache.CacheUtils.invalidateAllIf;
 import static io.trino.plugin.jdbc.BaseJdbcConfig.CACHING_DISABLED;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -83,6 +85,7 @@ public class CachingJdbcClient
     private final Cache<TableNamesCacheKey, List<SchemaTableName>> tableNamesCache;
     private final Cache<TableHandlesByNameCacheKey, Optional<JdbcTableHandle>> tableHandlesByNameCache;
     private final Cache<TableHandlesByQueryCacheKey, JdbcTableHandle> tableHandlesByQueryCache;
+    private final Cache<ProcedureHandlesByQueryCacheKey, JdbcProcedureHandle> procedureHandlesByQueryCache;
     private final Cache<ColumnsCacheKey, List<JdbcColumnHandle>> columnsCache;
     private final Cache<JdbcTableHandle, TableStatistics> statisticsCache;
 
@@ -148,6 +151,7 @@ public class CachingJdbcClient
         tableNamesCache = buildCache(cacheSize, tableNamesCachingTtl);
         tableHandlesByNameCache = buildCache(cacheSize, metadataCachingTtl);
         tableHandlesByQueryCache = buildCache(cacheSize, metadataCachingTtl);
+        procedureHandlesByQueryCache = buildCache(cacheSize, metadataCachingTtl);
         columnsCache = buildCache(cacheSize, metadataCachingTtl);
         statisticsCache = buildCache(cacheSize, metadataCachingTtl);
     }
@@ -212,6 +216,12 @@ public class CachingJdbcClient
     }
 
     @Override
+    public Optional<Type> getSupportedType(ConnectorSession session, Type type)
+    {
+        return delegate.getSupportedType(session, type);
+    }
+
+    @Override
     public boolean supportsAggregationPushdown(ConnectorSession session, JdbcTableHandle table, List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments, List<List<ColumnHandle>> groupingSets)
     {
         return delegate.supportsAggregationPushdown(session, table, aggregates, assignments, groupingSets);
@@ -224,7 +234,7 @@ public class CachingJdbcClient
     }
 
     @Override
-    public Optional<String> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
     {
         return delegate.convertPredicate(session, expression, assignments);
     }
@@ -236,10 +246,23 @@ public class CachingJdbcClient
     }
 
     @Override
+    public ConnectorSplitSource getSplits(ConnectorSession session, JdbcProcedureHandle procedureHandle)
+    {
+        return delegate.getSplits(session, procedureHandle);
+    }
+
+    @Override
     public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException
     {
         return delegate.getConnection(session, split, tableHandle);
+    }
+
+    @Override
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcProcedureHandle procedureHandle)
+            throws SQLException
+    {
+        return delegate.getConnection(session, split, procedureHandle);
     }
 
     @Override
@@ -255,7 +278,7 @@ public class CachingJdbcClient
             JdbcTableHandle table,
             Optional<List<List<JdbcColumnHandle>>> groupingSets,
             List<JdbcColumnHandle> columns,
-            Map<String, String> columnExpressions)
+            Map<String, ParameterizedExpression> columnExpressions)
     {
         return delegate.prepareQuery(session, table, groupingSets, columns, columnExpressions);
     }
@@ -265,6 +288,13 @@ public class CachingJdbcClient
             throws SQLException
     {
         return delegate.buildSql(session, connection, split, table, columns);
+    }
+
+    @Override
+    public CallableStatement buildProcedure(ConnectorSession session, Connection connection, JdbcSplit split, JdbcProcedureHandle procedureHandle)
+            throws SQLException
+    {
+        return delegate.buildProcedure(session, connection, split, procedureHandle);
     }
 
     @Override
@@ -328,6 +358,13 @@ public class CachingJdbcClient
     }
 
     @Override
+    public JdbcProcedureHandle getProcedureHandle(ConnectorSession session, ProcedureQuery procedureQuery)
+    {
+        ProcedureHandlesByQueryCacheKey key = new ProcedureHandlesByQueryCacheKey(getIdentityKey(session), procedureQuery);
+        return get(procedureHandlesByQueryCache, key, () -> delegate.getProcedureHandle(session, procedureQuery));
+    }
+
+    @Override
     public void commitCreateTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds)
     {
         delegate.commitCreateTable(session, handle, pageSinkIds);
@@ -380,10 +417,10 @@ public class CachingJdbcClient
     }
 
     @Override
-    public PreparedStatement getPreparedStatement(Connection connection, String sql)
+    public PreparedStatement getPreparedStatement(Connection connection, String sql, Optional<Integer> columnCount)
             throws SQLException
     {
-        return delegate.getPreparedStatement(connection, sql);
+        return delegate.getPreparedStatement(connection, sql, columnCount);
     }
 
     @Override
@@ -415,9 +452,9 @@ public class CachingJdbcClient
     }
 
     @Override
-    public void dropSchema(ConnectorSession session, String schemaName)
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
-        delegate.dropSchema(session, schemaName);
+        delegate.dropSchema(session, schemaName, cascade);
         invalidateSchemasCache();
     }
 
@@ -535,9 +572,15 @@ public class CachingJdbcClient
         return delegate.getTableScanRedirection(session, tableHandle);
     }
 
+    @Override
+    public OptionalInt getMaxWriteParallelism(ConnectorSession session)
+    {
+        return delegate.getMaxWriteParallelism(session);
+    }
+
     public void onDataChanged(SchemaTableName table)
     {
-        invalidateCache(statisticsCache, key -> key.mayReference(table));
+        invalidateAllIf(statisticsCache, key -> key.mayReference(table));
     }
 
     /**
@@ -548,7 +591,7 @@ public class CachingJdbcClient
     @Deprecated
     public void onDataChanged(JdbcTableHandle handle)
     {
-        invalidateCache(statisticsCache, key -> key.equals(handle));
+        statisticsCache.invalidate(handle);
     }
 
     @Override
@@ -557,6 +600,14 @@ public class CachingJdbcClient
         OptionalLong deletedRowsCount = delegate.delete(session, handle);
         onDataChanged(handle.getRequiredNamedRelation().getSchemaTableName());
         return deletedRowsCount;
+    }
+
+    @Override
+    public OptionalLong update(ConnectorSession session, JdbcTableHandle handle)
+    {
+        OptionalLong updatedRowsCount = delegate.update(session, handle);
+        onDataChanged(handle.getRequiredNamedRelation().getSchemaTableName());
+        return updatedRowsCount;
     }
 
     @Override
@@ -602,15 +653,15 @@ public class CachingJdbcClient
     private void invalidateTableCaches(SchemaTableName schemaTableName)
     {
         invalidateColumnsCache(schemaTableName);
-        invalidateCache(tableHandlesByNameCache, key -> key.tableName.equals(schemaTableName));
+        invalidateAllIf(tableHandlesByNameCache, key -> key.tableName.equals(schemaTableName));
         tableHandlesByQueryCache.invalidateAll();
-        invalidateCache(tableNamesCache, key -> key.schemaName.equals(Optional.of(schemaTableName.getSchemaName())));
-        invalidateCache(statisticsCache, key -> key.mayReference(schemaTableName));
+        invalidateAllIf(tableNamesCache, key -> key.schemaName.equals(Optional.of(schemaTableName.getSchemaName())));
+        invalidateAllIf(statisticsCache, key -> key.mayReference(schemaTableName));
     }
 
     private void invalidateColumnsCache(SchemaTableName table)
     {
-        invalidateCache(columnsCache, key -> key.table.equals(table));
+        invalidateAllIf(columnsCache, key -> key.table.equals(table));
     }
 
     @VisibleForTesting
@@ -638,6 +689,12 @@ public class CachingJdbcClient
     }
 
     @VisibleForTesting
+    CacheStats getProcedureHandlesByQueryCacheStats()
+    {
+        return procedureHandlesByQueryCache.stats();
+    }
+
+    @VisibleForTesting
     CacheStats getColumnsCacheStats()
     {
         return columnsCache.stats();
@@ -649,18 +706,8 @@ public class CachingJdbcClient
         return statisticsCache.stats();
     }
 
-    private static <T, V> void invalidateCache(Cache<T, V> cache, Predicate<T> filterFunction)
-    {
-        Set<T> cacheKeys = cache.asMap().keySet().stream()
-                .filter(filterFunction)
-                .collect(toImmutableSet());
-
-        cache.invalidateAll(cacheKeys);
-    }
-
     private record ColumnsCacheKey(IdentityCacheKey identity, Map<String, Object> sessionProperties, SchemaTableName table)
     {
-        @SuppressWarnings("UnusedVariable") // TODO: Remove once https://github.com/google/error-prone/issues/2713 is fixed
         private ColumnsCacheKey
         {
             requireNonNull(identity, "identity is null");
@@ -684,6 +731,15 @@ public class CachingJdbcClient
         {
             requireNonNull(identity, "identity is null");
             requireNonNull(preparedQuery, "preparedQuery is null");
+        }
+    }
+
+    private record ProcedureHandlesByQueryCacheKey(IdentityCacheKey identity, ProcedureQuery procedureQuery)
+    {
+        private ProcedureHandlesByQueryCacheKey
+        {
+            requireNonNull(identity, "identity is null");
+            requireNonNull(procedureQuery, "procedureQuery is null");
         }
     }
 

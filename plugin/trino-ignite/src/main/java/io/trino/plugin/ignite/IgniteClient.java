@@ -17,21 +17,25 @@ import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.inject.Inject;
 import io.trino.plugin.base.aggregation.AggregateFunctionRewriter;
 import io.trino.plugin.base.aggregation.AggregateFunctionRule;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
+import io.trino.plugin.base.mapping.IdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
+import io.trino.plugin.jdbc.JdbcJoinCondition;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongReadFunction;
 import io.trino.plugin.jdbc.LongWriteFunction;
+import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.WriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
@@ -42,16 +46,19 @@ import io.trino.plugin.jdbc.aggregation.ImplementCountDistinct;
 import io.trino.plugin.jdbc.aggregation.ImplementMinMax;
 import io.trino.plugin.jdbc.aggregation.ImplementSum;
 import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
-import io.trino.plugin.jdbc.mapping.IdentifierMapping;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.JoinStatistics;
+import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
@@ -59,9 +66,7 @@ import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
-
-import javax.annotation.Nullable;
-import javax.inject.Inject;
+import jakarta.annotation.Nullable;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -75,7 +80,6 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalLong;
 import java.util.function.BiFunction;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -110,6 +114,7 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryWriteFunction
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -142,7 +147,8 @@ public class IgniteClient
     private static final LocalDate MIN_DATE = LocalDate.parse("1970-01-01");
     private static final LocalDate MAX_DATE = LocalDate.parse("9999-12-31");
 
-    private final AggregateFunctionRewriter<JdbcExpression, String> aggregateFunctionRewriter;
+    private final ConnectorExpressionRewriter<ParameterizedExpression> connectorExpressionRewriter;
+    private final AggregateFunctionRewriter<JdbcExpression, ?> aggregateFunctionRewriter;
 
     @Inject
     public IgniteClient(
@@ -152,15 +158,17 @@ public class IgniteClient
             IdentifierMapping identifierMapping,
             RemoteQueryModifier queryModifier)
     {
-        super(config, "`", connectionFactory, queryBuilder, identifierMapping, queryModifier);
+        super("`", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, false);
 
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
-        ConnectorExpressionRewriter<String> connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
+        this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
                 .addStandardRules(this::quoted)
+                .map("$like(value: varchar, pattern: varchar): boolean").to("value LIKE pattern")
+                .map("$like(value: varchar, pattern: varchar, escape: varchar(1)): boolean").to("value LIKE pattern ESCAPE escape")
                 .build();
         this.aggregateFunctionRewriter = new AggregateFunctionRewriter<>(
                 connectorExpressionRewriter,
-                ImmutableSet.<AggregateFunctionRule<JdbcExpression, String>>builder()
+                ImmutableSet.<AggregateFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
                         .add(new ImplementCountAll(bigintTypeHandle))
                         .add(new ImplementCount(bigintTypeHandle))
                         .add(new ImplementMinMax(true))
@@ -305,6 +313,12 @@ public class IgniteClient
         return aggregateFunctionRewriter.rewrite(session, aggregate, assignments);
     }
 
+    @Override
+    public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return connectorExpressionRewriter.rewrite(session, expression, assignments);
+    }
+
     private static Optional<JdbcTypeHandle> toTypeHandle(DecimalType decimalType)
     {
         return Optional.of(
@@ -368,14 +382,25 @@ public class IgniteClient
 
         int expectedSize = tableMetadata.getColumns().size();
         ImmutableList.Builder<String> columns = ImmutableList.builderWithExpectedSize(expectedSize);
-        ImmutableList.Builder<String> columnNames = ImmutableList.builderWithExpectedSize(expectedSize);
+        ImmutableList.Builder<String> columnNamesBuilder = ImmutableList.builderWithExpectedSize(expectedSize);
         ImmutableList.Builder<Type> columnTypes = ImmutableList.builderWithExpectedSize(expectedSize);
         for (ColumnMetadata columnMetadata : tableMetadata.getColumns()) {
             columns.add(getColumnDefinitionSql(session, columnMetadata, columnMetadata.getName()));
-            columnNames.add(columnMetadata.getName());
+            columnNamesBuilder.add(columnMetadata.getName());
             columnTypes.add(columnMetadata.getType());
         }
-        String sql = buildCreateSql(schemaTableName, columns.build(), tableMetadata.getProperties());
+
+        List<String> columnNames = columnNamesBuilder.build();
+        List<String> primaryKeys = IgniteTableProperties.getPrimaryKey(tableMetadata.getProperties());
+
+        for (String primaryKey : primaryKeys) {
+            if (!columnNames.contains(primaryKey)) {
+                throw new TrinoException(INVALID_TABLE_PROPERTY,
+                        format("Column '%s' specified in property '%s' doesn't exist in table", primaryKey, PRIMARY_KEY_PROPERTY));
+            }
+        }
+
+        String sql = buildCreateSql(schemaTableName, columns.build(), primaryKeys);
 
         try (Connection connection = connectionFactory.openConnection(session)) {
             execute(session, connection, sql);
@@ -383,35 +408,27 @@ public class IgniteClient
             return new IgniteOutputTableHandle(
                     schemaTableName.getSchemaName(),
                     schemaTableName.getTableName(),
-                    columnNames.build(),
+                    columnNames,
                     columnTypes.build(),
                     Optional.empty(),
-                    IgniteTableProperties.getPrimaryKey(tableMetadata.getProperties()).isEmpty() ? Optional.of(IGNITE_DUMMY_ID) : Optional.empty());
+                    primaryKeys.isEmpty() ? Optional.of(IGNITE_DUMMY_ID) : Optional.empty());
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
-    private String buildCreateSql(SchemaTableName schemaTableName, List<String> columns, Map<String, Object> tableProperties)
+    private String buildCreateSql(SchemaTableName schemaTableName, List<String> columns, List<String> primaryKeys)
     {
         ImmutableList.Builder<String> columnDefinitions = ImmutableList.builder();
         columnDefinitions.addAll(columns);
 
-        List<String> primaryKeys = IgniteTableProperties.getPrimaryKey(tableProperties);
         checkArgument(primaryKeys.size() < columns.size(), "Ignite table must have at least one non PRIMARY KEY column.");
         if (primaryKeys.isEmpty()) {
             columnDefinitions.add(quoted(IGNITE_DUMMY_ID) + " VARCHAR NOT NULL");
             primaryKeys = ImmutableList.of(IGNITE_DUMMY_ID);
         }
         columnDefinitions.add("PRIMARY KEY (" + join(", ", primaryKeys.stream().map(this::quoted).collect(joining(", "))) + ")");
-
-        for (Map.Entry<String, Object> propertyEntry : tableProperties.entrySet()) {
-            String propertyKey = propertyEntry.getKey();
-            if (!PRIMARY_KEY_PROPERTY.equalsIgnoreCase(propertyKey)) {
-                throw new UnsupportedOperationException("Not support table property " + propertyKey);
-            }
-        }
 
         String remoteTableName = quoted(null, schemaTableName.getSchemaName(), schemaTableName.getTableName());
         return format("CREATE TABLE %s (%s) ", remoteTableName, join(", ", columnDefinitions.build()));
@@ -488,7 +505,7 @@ public class IgniteClient
         String schemaName = requireNonNull(schemaTableName.getSchemaName(), "Ignite schema name can not be null").toUpperCase(ENGLISH);
         String tableName = requireNonNull(schemaTableName.getTableName(), "Ignite table name can not be null").toUpperCase(ENGLISH);
         // Get primary keys from 'sys.indexes' because DatabaseMetaData.getPrimaryKeys doesn't work well while table being concurrent modified
-        String sql = "SELECT COLUMNS FROM sys.indexes WHERE SCHEMA_NAME = ? AND TABLE_NAME = ? AND INDEX_NAME = '_key_PK' LIMIT 1";
+        String sql = "SELECT COLUMNS FROM sys.indexes WHERE SCHEMA_NAME = ? AND TABLE_NAME = ? AND IS_PK LIMIT 1";
 
         try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
             preparedStatement.setString(1, schemaName);
@@ -548,9 +565,28 @@ public class IgniteClient
     }
 
     @Override
-    public OptionalLong delete(ConnectorSession session, JdbcTableHandle handle)
+    public Optional<PreparedQuery> implementJoin(
+            ConnectorSession session,
+            JoinType joinType,
+            PreparedQuery leftSource,
+            PreparedQuery rightSource,
+            List<JdbcJoinCondition> joinConditions,
+            Map<JdbcColumnHandle, String> rightAssignments,
+            Map<JdbcColumnHandle, String> leftAssignments,
+            JoinStatistics statistics)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support modifying table rows");
+        // Ignite does not support FULL JOIN
+        if (joinType == JoinType.FULL_OUTER) {
+            return Optional.empty();
+        }
+
+        return super.implementJoin(session, joinType, leftSource, rightSource, joinConditions, rightAssignments, leftAssignments, statistics);
+    }
+
+    @Override
+    protected boolean isSupportedJoinCondition(ConnectorSession session, JdbcJoinCondition joinCondition)
+    {
+        return true;
     }
 
     @Override
@@ -560,7 +596,7 @@ public class IgniteClient
     }
 
     @Override
-    public void dropSchema(ConnectorSession session, String schemaName)
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support dropping schemas");
     }

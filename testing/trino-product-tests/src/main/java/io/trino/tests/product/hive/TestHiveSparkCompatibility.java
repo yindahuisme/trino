@@ -14,19 +14,23 @@
 package io.trino.tests.product.hive;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
 import io.trino.tempto.ProductTest;
+import io.trino.tempto.hadoop.hdfs.HdfsClient;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.tempto.assertions.QueryAssert.Row;
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
 import static io.trino.tempto.assertions.QueryAssert.assertQueryFailure;
-import static io.trino.tempto.assertions.QueryAssert.assertThat;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.tests.product.TestGroups.HIVE_SPARK;
 import static io.trino.tests.product.TestGroups.HIVE_SPARK_NO_STATS_FALLBACK;
@@ -38,12 +42,16 @@ import static java.lang.String.format;
 import static java.lang.String.join;
 import static java.util.Collections.nCopies;
 import static java.util.Locale.ENGLISH;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHiveSparkCompatibility
         extends ProductTest
 {
     // see spark-defaults.conf
     private static final String TRINO_CATALOG = "hive";
+
+    @Inject
+    private HdfsClient hdfsClient;
 
     @Test(groups = {HIVE_SPARK, PROFILE_SPECIFIC_TESTS}, dataProvider = "testReadSparkCreatedTableDataProvider")
     public void testReadSparkCreatedTable(String sparkTableFormat, String expectedTrinoTableFormat)
@@ -217,6 +225,33 @@ public class TestHiveSparkCompatibility
     }
 
     @Test(groups = {HIVE_SPARK, PROFILE_SPECIFIC_TESTS})
+    public void testSparkClusteringCaseSensitiveCompatibility()
+    {
+        String sparkTableNameWithClusteringDifferentCase = "test_spark_clustering_case_sensitive_" + randomNameSuffix();
+        onSpark().executeQuery(
+                String.format("CREATE TABLE %s (row_id int, `segment_id` int, value long) ", sparkTableNameWithClusteringDifferentCase) +
+                        "USING PARQUET " +
+                        "PARTITIONED BY (`part` string) " +
+                        "CLUSTERED BY (`SEGMENT_ID`) " +
+                        "  SORTED BY (`SEGMENT_ID`) " +
+                        "  INTO 10 BUCKETS");
+
+        onSpark().executeQuery(format("INSERT INTO %s ", sparkTableNameWithClusteringDifferentCase) +
+                "VALUES " +
+                "  (1, 1, 100, 'part1')," +
+                "  (100, 1, 123, 'part2')," +
+                "  (101, 2, 202, 'part2')");
+
+        // Ensure that Trino can successfully read from the Spark bucketed table even though the clustering
+        // column `SEGMENT_ID` is in a different case than the data column `segment_id`
+        assertThat(onTrino().executeQuery(format("SELECT * FROM %s.default.%s", TRINO_CATALOG, sparkTableNameWithClusteringDifferentCase)))
+                .containsOnly(List.of(
+                        row(1, 1, 100, "part1"),
+                        row(100, 1, 123, "part2"),
+                        row(101, 2, 202, "part2")));
+    }
+
+    @Test(groups = {HIVE_SPARK, PROFILE_SPECIFIC_TESTS})
     public void testSparkParquetBloomFilterCompatibility()
     {
         String sparkTableNameWithBloomFilter = "test_spark_parquet_bloom_filter_compatibility_enabled_" + randomNameSuffix();
@@ -326,7 +361,7 @@ public class TestHiveSparkCompatibility
         onSpark().executeQuery("DROP TABLE " + hiveTableName);
     }
 
-    private static final String[] HIVE_TIMESTAMP_PRECISIONS = new String[]{"MILLISECONDS", "MICROSECONDS", "NANOSECONDS"};
+    private static final String[] HIVE_TIMESTAMP_PRECISIONS = new String[] {"MILLISECONDS", "MICROSECONDS", "NANOSECONDS"};
 
     @DataProvider
     public static Object[][] sparkParquetTimestampFormats()
@@ -337,10 +372,10 @@ public class TestHiveSparkCompatibility
 
         // Ordering of expected values matches the ordering in HIVE_TIMESTAMP_PRECISIONS
         return new Object[][] {
-                {"TIMESTAMP_MILLIS", millisTimestamp, new String[]{millisTimestamp, millisTimestamp, millisTimestamp}},
-                {"TIMESTAMP_MICROS", microsTimestamp, new String[]{millisTimestamp, microsTimestamp, microsTimestamp}},
+                {"TIMESTAMP_MILLIS", millisTimestamp, new String[] {millisTimestamp, millisTimestamp, millisTimestamp}},
+                {"TIMESTAMP_MICROS", microsTimestamp, new String[] {millisTimestamp, microsTimestamp, microsTimestamp}},
                 // note that Spark timestamp has microsecond precision
-                {"INT96", nanosTimestamp, new String[]{millisTimestamp, microsTimestamp, microsTimestamp}},
+                {"INT96", nanosTimestamp, new String[] {millisTimestamp, microsTimestamp, microsTimestamp}},
         };
     }
 
@@ -364,13 +399,6 @@ public class TestHiveSparkCompatibility
     public void testReadTrinoCreatedParquetTable()
     {
         testReadTrinoCreatedTable("using_parquet", "PARQUET");
-    }
-
-    @Test(groups = {HIVE_SPARK, PROFILE_SPECIFIC_TESTS})
-    public void testReadTrinoCreatedParquetTableWithNativeWriter()
-    {
-        onTrino().executeQuery("SET SESSION " + TRINO_CATALOG + ".parquet_optimized_writer_enabled = true");
-        testReadTrinoCreatedTable("using_native_parquet", "PARQUET");
     }
 
     private void testReadTrinoCreatedTable(String tableName, String tableFormat)
@@ -545,6 +573,32 @@ public class TestHiveSparkCompatibility
                         row(6, "-0001-01-01")));
 
         onTrino().executeQuery("DROP TABLE " + trinoTableName);
+    }
+
+    @Test(groups = {HIVE_SPARK, PROFILE_SPECIFIC_TESTS})
+    public void testTextInputFormatWithParquetHiveSerDe()
+            throws IOException
+    {
+        String tableName = "test_text_input_format_with_parquet_hive_ser_de" + randomNameSuffix();
+        onHive().executeQuery("" +
+                "CREATE EXTERNAL TABLE " + tableName +
+                "(col INT) " +
+                "ROW FORMAT SERDE 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe' " +
+                "STORED AS INPUTFORMAT 'org.apache.hadoop.mapred.TextInputFormat' " +
+                "OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat' " +
+                "LOCATION '/tmp/" + tableName + "'");
+        onSpark().executeQuery("INSERT INTO " + tableName + " VALUES(1)");
+        assertThat(onSpark().executeQuery("SELECT * FROM " + tableName)).containsOnly(row(1));
+        assertThat(onTrino().executeQuery("SELECT * FROM " + tableName)).containsOnly(row(1));
+        List<String> files = hdfsClient.listDirectory("/tmp/" + tableName + "/");
+        assertThat(files).hasSize(2);
+        assertThat(files.stream().filter(name -> !name.contains("SUCCESS")).collect(toImmutableList()).get(0)).endsWith("parquet");
+        List<Object> result = new ArrayList<>();
+        result.add(null);
+        assertThat(onHive().executeQuery("SELECT * FROM " + tableName)).containsOnly(new Row(result), new Row(result));
+        assertQueryFailure(() -> onTrino().executeQuery("INSERT INTO " + tableName + " VALUES(2)")).hasMessageFindingMatch("Output format org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat with SerDe org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe is not supported");
+        assertQueryFailure(() -> onHive().executeQuery("INSERT INTO " + tableName + " VALUES(2)")).hasMessageFindingMatch(".*Error while processing statement.*");
+        onHive().executeQuery("DROP TABLE " + tableName);
     }
 
     @Test(groups = {HIVE_SPARK, PROFILE_SPECIFIC_TESTS}, dataProvider = "unsupportedPartitionDates")

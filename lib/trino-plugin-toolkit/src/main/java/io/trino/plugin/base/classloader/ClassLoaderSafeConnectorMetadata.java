@@ -13,12 +13,12 @@
  */
 package io.trino.plugin.base.classloader;
 
+import com.google.inject.Inject;
 import io.airlift.slice.Slice;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.BeginTableExecuteResult;
-import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.CatalogSchemaTableName;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -49,6 +49,8 @@ import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.MaterializedViewFreshness;
 import io.trino.spi.connector.ProjectionApplicationResult;
+import io.trino.spi.connector.RelationColumnsMetadata;
+import io.trino.spi.connector.RelationCommentMetadata;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SampleApplicationResult;
@@ -61,15 +63,17 @@ import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.connector.TableFunctionApplicationResult;
 import io.trino.spi.connector.TableScanRedirectApplicationResult;
 import io.trino.spi.connector.TopNApplicationResult;
+import io.trino.spi.connector.WriterScalingOptions;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Constant;
 import io.trino.spi.function.AggregationFunctionMetadata;
 import io.trino.spi.function.BoundSignature;
 import io.trino.spi.function.FunctionDependencyDeclaration;
 import io.trino.spi.function.FunctionId;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.SchemaFunctionName;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.ptf.ConnectorTableFunctionHandle;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.RoleGrant;
@@ -79,15 +83,15 @@ import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.statistics.TableStatisticsMetadata;
 import io.trino.spi.type.Type;
 
-import javax.inject.Inject;
-
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.UnaryOperator;
 
 import static java.util.Objects.requireNonNull;
 
@@ -125,6 +129,14 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             return delegate.getNewTableLayout(session, tableMetadata);
+        }
+    }
+
+    @Override
+    public Optional<Type> getSupportedType(ConnectorSession session, Map<String, Object> tableProperties, Type type)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getSupportedType(session, tableProperties, type);
         }
     }
 
@@ -241,18 +253,18 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public ConnectorTableSchema getTableSchema(ConnectorSession session, ConnectorTableHandle table)
+    public SchemaTableName getTableName(ConnectorSession session, ConnectorTableHandle table)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getTableSchema(session, table);
+            return delegate.getTableName(session, table);
         }
     }
 
     @Override
-    public SchemaTableName getSchemaTableName(ConnectorSession session, ConnectorTableHandle table)
+    public ConnectorTableSchema getTableSchema(ConnectorSession session, ConnectorTableHandle table)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getSchemaTableName(session, table);
+            return delegate.getTableSchema(session, table);
         }
     }
 
@@ -313,6 +325,25 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
+    public ClassLoaderSafeIterator<RelationColumnsMetadata> streamRelationColumns(
+            ConnectorSession session,
+            Optional<String> schemaName,
+            UnaryOperator<Set<SchemaTableName>> relationFilter)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return new ClassLoaderSafeIterator<>(delegate.streamRelationColumns(session, schemaName, relationFilter), classLoader);
+        }
+    }
+
+    @Override
+    public ClassLoaderSafeIterator<RelationCommentMetadata> streamRelationComments(ConnectorSession session, Optional<String> schemaName, UnaryOperator<Set<SchemaTableName>> relationFilter)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return new ClassLoaderSafeIterator<>(delegate.streamRelationComments(session, schemaName, relationFilter), classLoader);
+        }
+    }
+
+    @Override
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
@@ -329,10 +360,26 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
+    public void addField(ConnectorSession session, ConnectorTableHandle tableHandle, List<String> parentPath, String fieldName, Type type, boolean ignoreExisting)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.addField(session, tableHandle, parentPath, fieldName, type, ignoreExisting);
+        }
+    }
+
+    @Override
     public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Type type)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             delegate.setColumnType(session, tableHandle, column, type);
+        }
+    }
+
+    @Override
+    public void setFieldType(ConnectorSession session, ConnectorTableHandle tableHandle, List<String> fieldPath, Type type)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.setFieldType(session, tableHandle, fieldPath, type);
         }
     }
 
@@ -353,10 +400,10 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public void dropSchema(ConnectorSession session, String schemaName)
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            delegate.dropSchema(session, schemaName);
+            delegate.dropSchema(session, schemaName, cascade);
         }
     }
 
@@ -405,6 +452,14 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             delegate.renameColumn(session, tableHandle, source, target);
+        }
+    }
+
+    @Override
+    public void renameField(ConnectorSession session, ConnectorTableHandle tableHandle, List<String> fieldPath, String target)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.renameField(session, tableHandle, fieldPath, target);
         }
     }
 
@@ -461,6 +516,14 @@ public class ClassLoaderSafeConnectorMetadata
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
             delegate.setViewColumnComment(session, viewName, columnName, comment);
+        }
+    }
+
+    @Override
+    public void setMaterializedViewColumnComment(ConnectorSession session, SchemaTableName viewName, String columnName, Optional<String> comment)
+    {
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            delegate.setMaterializedViewColumnComment(session, viewName, columnName, comment);
         }
     }
 
@@ -623,18 +686,30 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public Map<String, Object> getSchemaProperties(ConnectorSession session, CatalogSchemaName schemaName)
+    public Map<String, Object> getSchemaProperties(ConnectorSession session, String schemaName)
+    {
+        return delegate.getSchemaProperties(session, schemaName);
+    }
+
+    @Override
+    public Optional<TrinoPrincipal> getSchemaOwner(ConnectorSession session, String schemaName)
+    {
+        return delegate.getSchemaOwner(session, schemaName);
+    }
+
+    @Override
+    public Optional<ConnectorTableHandle> applyUpdate(ConnectorSession session, ConnectorTableHandle handle, Map<ColumnHandle, Constant> assignments)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getSchemaProperties(session, schemaName);
+            return delegate.applyUpdate(session, handle, assignments);
         }
     }
 
     @Override
-    public Optional<TrinoPrincipal> getSchemaOwner(ConnectorSession session, CatalogSchemaName schemaName)
+    public OptionalLong executeUpdate(ConnectorSession session, ConnectorTableHandle handle)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.getSchemaOwner(session, schemaName);
+            return delegate.executeUpdate(session, handle);
         }
     }
 
@@ -1041,10 +1116,10 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    public void finishMerge(ConnectorSession session, ConnectorMergeTableHandle mergeTableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            delegate.finishMerge(session, tableHandle, fragments, computedStatistics);
+            delegate.finishMerge(session, mergeTableHandle, fragments, computedStatistics);
         }
     }
 
@@ -1073,25 +1148,26 @@ public class ClassLoaderSafeConnectorMetadata
     }
 
     @Override
-    public boolean supportsReportingWrittenBytes(ConnectorSession session, SchemaTableName schemaTableName, Map<String, Object> tableProperties)
+    public OptionalInt getMaxWriterTasks(ConnectorSession session)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.supportsReportingWrittenBytes(session, schemaTableName, tableProperties);
+            return delegate.getMaxWriterTasks(session);
         }
     }
 
     @Override
-    public boolean supportsReportingWrittenBytes(ConnectorSession session, ConnectorTableHandle connectorTableHandle)
+    public WriterScalingOptions getNewTableWriterScalingOptions(ConnectorSession session, SchemaTableName tableName, Map<String, Object> tableProperties)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
-            return delegate.supportsReportingWrittenBytes(session, connectorTableHandle);
+            return delegate.getNewTableWriterScalingOptions(session, tableName, tableProperties);
         }
     }
 
     @Override
-    protected Object clone()
-            throws CloneNotSupportedException
+    public WriterScalingOptions getInsertWriterScalingOptions(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        return super.clone();
+        try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+            return delegate.getInsertWriterScalingOptions(session, tableHandle);
+        }
     }
 }

@@ -14,10 +14,11 @@
 
 package io.trino.plugin.deltalake.expression;
 
-import org.testng.annotations.Test;
+import io.trino.plugin.deltalake.expression.ArithmeticBinaryExpression.Operator;
+import org.junit.jupiter.api.Test;
 
 import static io.trino.plugin.deltalake.expression.SparkExpressionParser.createExpression;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 
 public class TestSparkExpressionParser
@@ -49,6 +50,20 @@ public class TestSparkExpressionParser
         // Spark allows spaces after 'r' for raw literals
         assertParseFailure("r 'a space after prefix'", "extraneous input ''a space after prefix'' expecting <EOF>");
         assertParseFailure("r  'two spaces after prefix'", "extraneous input ''two spaces after prefix'' expecting <EOF>");
+    }
+
+    @Test
+    public void testArithmeticBinary()
+    {
+        assertEquals(createExpression("a + b * c"), new ArithmeticBinaryExpression(
+                Operator.ADD,
+                new Identifier("a"),
+                new ArithmeticBinaryExpression(Operator.MULTIPLY, new Identifier("b"), new Identifier("c"))));
+
+        assertEquals(createExpression("a * b + c"), new ArithmeticBinaryExpression(
+                Operator.ADD,
+                new ArithmeticBinaryExpression(Operator.MULTIPLY, new Identifier("a"), new Identifier("b")),
+                new Identifier("c")));
     }
 
     private static void assertStringLiteral(String sparkExpression, String expected)

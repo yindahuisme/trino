@@ -1421,9 +1421,7 @@ public class TestPostgreSqlTypeMapping
                 .addRoundTrip("TIMESTAMP '1969-12-31 23:59:59.999999499999'", "TIMESTAMP '1969-12-31 23:59:59.999999'")
                 .addRoundTrip("TIMESTAMP '1969-12-31 23:59:59.9999994'", "TIMESTAMP '1969-12-31 23:59:59.999999'")
 
-                // CTAS with Trino, where the coercion is done by the connector
                 .execute(getQueryRunner(), trinoCreateAsSelect("test_timestamp_coercion"))
-                // INSERT with Trino, where the coercion is done by the engine
                 .execute(getQueryRunner(), trinoCreateAndInsert("test_timestamp_coercion"));
     }
 
@@ -1917,7 +1915,7 @@ public class TestPostgreSqlTypeMapping
     private void assertPostgreSqlQueryFails(@Language("SQL") String sql, String expectedMessage)
     {
         assertThatThrownBy(() -> postgreSqlServer.execute(sql))
-                .getCause()
+                .cause()
                 .hasMessageContaining(expectedMessage);
     }
 }

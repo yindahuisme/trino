@@ -5,12 +5,11 @@
     <parent>
         <groupId>io.trino</groupId>
         <artifactId>trino-root</artifactId>
-        <version>410-SNAPSHOT</version>
+        <version>430-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
     <artifactId>trino-testing-resources</artifactId>
-    <name>trino-testing-resources</name>
 
     <properties>
         <air.main.basedir>${project.parent.basedir}</air.main.basedir>
@@ -18,8 +17,8 @@
 
     <dependencies>
         <dependency>
-            <groupId>org.testng</groupId>
-            <artifactId>testng</artifactId>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

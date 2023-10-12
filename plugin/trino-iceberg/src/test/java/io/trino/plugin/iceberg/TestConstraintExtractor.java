@@ -35,15 +35,15 @@ import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.iterative.rule.UnwrapCastInComparison;
 import io.trino.sql.planner.iterative.rule.UnwrapDateTruncInComparison;
+import io.trino.sql.planner.iterative.rule.UnwrapYearInComparison;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.ComparisonExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.FunctionCall;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.SymbolReference;
 import io.trino.transaction.NoOpTransactionManager;
 import io.trino.transaction.TransactionId;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -64,7 +64,9 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.Timestamps.MILLISECONDS_PER_DAY;
 import static io.trino.spi.type.Timestamps.MILLISECONDS_PER_SECOND;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MICROSECOND;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.toSqlType;
 import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
 import static io.trino.sql.planner.TypeAnalyzer.createTestingTypeAnalyzer;
@@ -116,7 +118,7 @@ public class TestConstraintExtractor
         Cast castOfColumn = new Cast(new SymbolReference(timestampTzColumnSymbol), toSqlType(DATE));
 
         LocalDate someDate = LocalDate.of(2005, 9, 10);
-        Expression someDateExpression = LITERAL_ENCODER.toExpression(TEST_SESSION, someDate.toEpochDay(), DATE);
+        Expression someDateExpression = LITERAL_ENCODER.toExpression(someDate.toEpochDay(), DATE);
 
         long startOfDateUtcEpochMillis = someDate.atStartOfDay().toEpochSecond(UTC) * MILLISECONDS_PER_SECOND;
         LongTimestampWithTimeZone startOfDateUtc = timestampTzFromEpochMillis(startOfDateUtcEpochMillis);
@@ -183,18 +185,16 @@ public class TestConstraintExtractor
     {
         String timestampTzColumnSymbol = "timestamp_tz_symbol";
         FunctionCall truncateToDay = new FunctionCall(
-                QualifiedName.of("date_trunc"),
+                PLANNER_CONTEXT.getMetadata().resolveBuiltinFunction("date_trunc", fromTypes(VARCHAR, TIMESTAMP_TZ_MICROS)).toQualifiedName(),
                 List.of(
-                        LITERAL_ENCODER.toExpression(TEST_SESSION, utf8Slice("day"), createVarcharType(17)),
+                        LITERAL_ENCODER.toExpression(utf8Slice("day"), createVarcharType(17)),
                         new SymbolReference(timestampTzColumnSymbol)));
 
         LocalDate someDate = LocalDate.of(2005, 9, 10);
         Expression someMidnightExpression = LITERAL_ENCODER.toExpression(
-                TEST_SESSION,
                 LongTimestampWithTimeZone.fromEpochMillisAndFraction(someDate.toEpochDay() * MILLISECONDS_PER_DAY, 0, UTC_KEY),
                 TIMESTAMP_TZ_MICROS);
         Expression someMiddayExpression = LITERAL_ENCODER.toExpression(
-                TEST_SESSION,
                 LongTimestampWithTimeZone.fromEpochMillisAndFraction(someDate.toEpochDay() * MILLISECONDS_PER_DAY, PICOSECONDS_PER_MICROSECOND, UTC_KEY),
                 TIMESTAMP_TZ_MICROS);
 
@@ -257,6 +257,77 @@ public class TestConstraintExtractor
                         true))));
     }
 
+    /**
+     * Test equivalent of {@link UnwrapYearInComparison} for {@link TimestampWithTimeZoneType}.
+     * {@link UnwrapYearInComparison} handles {@link DateType} and {@link TimestampType}, but cannot handle
+     * {@link TimestampWithTimeZoneType}. Such unwrap would not be monotonic. Within Iceberg, we know
+     * that {@link TimestampWithTimeZoneType} is always in UTC zone (point in time, with no time zone information),
+     * so we can unwrap.
+     */
+    @Test
+    public void testExtractYearTimestampTzComparison()
+    {
+        String timestampTzColumnSymbol = "timestamp_tz_symbol";
+        FunctionCall extractYear = new FunctionCall(
+                PLANNER_CONTEXT.getMetadata().resolveBuiltinFunction("year", fromTypes(TIMESTAMP_TZ_MICROS)).toQualifiedName(),
+                List.of(new SymbolReference(timestampTzColumnSymbol)));
+
+        LocalDate someDate = LocalDate.of(2005, 9, 10);
+        Expression yearExpression = LITERAL_ENCODER.toExpression(2005L, BIGINT);
+
+        long startOfYearUtcEpochMillis = someDate.withDayOfYear(1).atStartOfDay().toEpochSecond(UTC) * MILLISECONDS_PER_SECOND;
+        LongTimestampWithTimeZone startOfYearUtc = timestampTzFromEpochMillis(startOfYearUtcEpochMillis);
+        LongTimestampWithTimeZone startOfNextDateUtc = timestampTzFromEpochMillis(someDate.plusYears(1).withDayOfYear(1).atStartOfDay().toEpochSecond(UTC) * MILLISECONDS_PER_SECOND);
+
+        assertThat(extract(
+                constraint(
+                        new ComparisonExpression(EQUAL, extractYear, yearExpression),
+                        Map.of(timestampTzColumnSymbol, A_TIMESTAMP_TZ))))
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(A_TIMESTAMP_TZ, domain(Range.range(TIMESTAMP_TZ_MICROS, startOfYearUtc, true, startOfNextDateUtc, false)))));
+
+        assertThat(extract(
+                constraint(
+                        new ComparisonExpression(NOT_EQUAL, extractYear, yearExpression),
+                        Map.of(timestampTzColumnSymbol, A_TIMESTAMP_TZ))))
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(A_TIMESTAMP_TZ, domain(
+                        Range.lessThan(TIMESTAMP_TZ_MICROS, startOfYearUtc),
+                        Range.greaterThanOrEqual(TIMESTAMP_TZ_MICROS, startOfNextDateUtc)))));
+
+        assertThat(extract(
+                constraint(
+                        new ComparisonExpression(LESS_THAN, extractYear, yearExpression),
+                        Map.of(timestampTzColumnSymbol, A_TIMESTAMP_TZ))))
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(A_TIMESTAMP_TZ, domain(Range.lessThan(TIMESTAMP_TZ_MICROS, startOfYearUtc)))));
+
+        assertThat(extract(
+                constraint(
+                        new ComparisonExpression(LESS_THAN_OR_EQUAL, extractYear, yearExpression),
+                        Map.of(timestampTzColumnSymbol, A_TIMESTAMP_TZ))))
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(A_TIMESTAMP_TZ, domain(Range.lessThan(TIMESTAMP_TZ_MICROS, startOfNextDateUtc)))));
+
+        assertThat(extract(
+                constraint(
+                        new ComparisonExpression(GREATER_THAN, extractYear, yearExpression),
+                        Map.of(timestampTzColumnSymbol, A_TIMESTAMP_TZ))))
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(A_TIMESTAMP_TZ, domain(Range.greaterThanOrEqual(TIMESTAMP_TZ_MICROS, startOfNextDateUtc)))));
+
+        assertThat(extract(
+                constraint(
+                        new ComparisonExpression(GREATER_THAN_OR_EQUAL, extractYear, yearExpression),
+                        Map.of(timestampTzColumnSymbol, A_TIMESTAMP_TZ))))
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(A_TIMESTAMP_TZ, domain(Range.greaterThanOrEqual(TIMESTAMP_TZ_MICROS, startOfYearUtc)))));
+
+        assertThat(extract(
+                constraint(
+                        new ComparisonExpression(IS_DISTINCT_FROM, extractYear, yearExpression),
+                        Map.of(timestampTzColumnSymbol, A_TIMESTAMP_TZ))))
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(A_TIMESTAMP_TZ, Domain.create(
+                        ValueSet.ofRanges(
+                                Range.lessThan(TIMESTAMP_TZ_MICROS, startOfYearUtc),
+                                Range.greaterThanOrEqual(TIMESTAMP_TZ_MICROS, startOfNextDateUtc)),
+                        true))));
+    }
+
     @Test
     public void testIntersectSummaryAndExpressionExtraction()
     {
@@ -264,7 +335,7 @@ public class TestConstraintExtractor
         Cast castOfColumn = new Cast(new SymbolReference(timestampTzColumnSymbol), toSqlType(DATE));
 
         LocalDate someDate = LocalDate.of(2005, 9, 10);
-        Expression someDateExpression = LITERAL_ENCODER.toExpression(TEST_SESSION, someDate.toEpochDay(), DATE);
+        Expression someDateExpression = LITERAL_ENCODER.toExpression(someDate.toEpochDay(), DATE);
 
         long startOfDateUtcEpochMillis = someDate.atStartOfDay().toEpochSecond(UTC) * MILLISECONDS_PER_SECOND;
         LongTimestampWithTimeZone startOfDateUtc = timestampTzFromEpochMillis(startOfDateUtcEpochMillis);

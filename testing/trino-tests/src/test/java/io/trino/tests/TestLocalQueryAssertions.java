@@ -16,7 +16,7 @@ package io.trino.tests;
 import io.trino.Session;
 import io.trino.testing.LocalQueryRunner;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import static io.airlift.testing.Closeables.closeAllSuppress;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,6 +44,7 @@ public class TestLocalQueryAssertions
         return queryRunner;
     }
 
+    @Test
     @Override
     public void testIsFullyPushedDown()
     {
@@ -52,6 +53,7 @@ public class TestLocalQueryAssertions
                 .hasMessage("isFullyPushedDown() currently does not work with LocalQueryRunner");
     }
 
+    @Test
     @Override
     public void testIsFullyPushedDownWithSession()
     {
@@ -68,25 +70,25 @@ public class TestLocalQueryAssertions
     public void testNullInErrorMessage()
     {
         assertThatThrownBy(() -> assertThat(query("SELECT CAST(null AS integer)")).matches("SELECT 1"))
-                .hasMessage("[Rows for query [SELECT CAST(null AS integer)]] \n" +
-                        "Expecting:\n" +
-                        "  <(null)>\n" +
+                .hasMessageContaining("[Rows for query [SELECT CAST(null AS integer)]] \n" +
+                        "Expecting actual:\n" +
+                        "  (null)\n" +
                         "to contain exactly in any order:\n" +
-                        "  <[(1)]>\n" +
+                        "  [(1)]\n" +
                         "elements not found:\n" +
-                        "  <(1)>\n" +
+                        "  (1)\n" +
                         "and elements not expected:\n" +
-                        "  <(null)>\n");
+                        "  (null)\n");
 
         assertThatThrownBy(() -> assertThat(query("SELECT 1")).matches("SELECT CAST(null AS integer)"))
-                .hasMessage("[Rows for query [SELECT 1]] \n" +
-                        "Expecting:\n" +
-                        "  <(1)>\n" +
+                .hasMessageContaining("[Rows for query [SELECT 1]] \n" +
+                        "Expecting actual:\n" +
+                        "  (1)\n" +
                         "to contain exactly in any order:\n" +
-                        "  <[(null)]>\n" +
+                        "  [(null)]\n" +
                         "elements not found:\n" +
-                        "  <(null)>\n" +
+                        "  (null)\n" +
                         "and elements not expected:\n" +
-                        "  <(1)>\n");
+                        "  (1)\n");
     }
 }

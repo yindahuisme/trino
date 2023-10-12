@@ -62,9 +62,10 @@ import io.trino.testing.LocalQueryRunner;
 import io.trino.testing.TestingAccessControlManager;
 import io.trino.testing.TestingMetadata.TestingTableHandle;
 import io.trino.transaction.TransactionManager;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.net.URI;
 import java.util.List;
@@ -75,6 +76,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
+import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
 import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.INVALID_MATERIALIZED_VIEW_PROPERTY;
@@ -95,9 +97,10 @@ import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 import static org.testng.Assert.assertEquals;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestCreateMaterializedViewTask
 {
     private static final String DEFAULT_MATERIALIZED_VIEW_FOO_PROPERTY_VALUE = null;
@@ -119,7 +122,7 @@ public class TestCreateMaterializedViewTask
     private LocalQueryRunner queryRunner;
     private CatalogHandle testCatalogHandle;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         testSession = testSessionBuilder()
@@ -147,11 +150,12 @@ public class TestCreateMaterializedViewTask
                 new AllowAllAccessControl(),
                 queryRunner.getTablePropertyManager(),
                 queryRunner.getAnalyzePropertyManager()),
-                new StatementRewrite(ImmutableSet.of()));
+                new StatementRewrite(ImmutableSet.of()),
+                plannerContext.getTracer());
         queryStateMachine = stateMachine(transactionManager, createTestMetadataManager(), new AllowAllAccessControl());
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         if (queryRunner != null) {
@@ -275,7 +279,7 @@ public class TestCreateMaterializedViewTask
                 accessControl,
                 new TablePropertyManager(CatalogServiceProvider.fail()),
                 new AnalyzePropertyManager(CatalogServiceProvider.fail()));
-        AnalyzerFactory analyzerFactory = new AnalyzerFactory(statementAnalyzerFactory, new StatementRewrite(ImmutableSet.of()));
+        AnalyzerFactory analyzerFactory = new AnalyzerFactory(statementAnalyzerFactory, new StatementRewrite(ImmutableSet.of()), plannerContext.getTracer());
         assertThatThrownBy(() -> getFutureValue(new CreateMaterializedViewTask(plannerContext, accessControl, parser, analyzerFactory, materializedViewPropertyManager)
                 .execute(statement, queryStateMachine, ImmutableList.of(), WarningCollector.NOOP)))
                 .isInstanceOf(AccessDeniedException.class)
@@ -297,6 +301,7 @@ public class TestCreateMaterializedViewTask
                 directExecutor(),
                 metadata,
                 WarningCollector.NOOP,
+                createPlanOptimizersStatsCollector(),
                 Optional.empty(),
                 true,
                 new NodeVersion("test"));

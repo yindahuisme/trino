@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.plugin.hive.HiveCompressionCodec;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -41,7 +41,7 @@ public class TestIcebergConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(IcebergConfig.class)
-                .setFileFormat(ORC)
+                .setFileFormat(PARQUET)
                 .setCompressionCodec(ZSTD)
                 .setUseFileSizeFromMetadata(true)
                 .setMaxPartitionsPerWriter(100)
@@ -50,6 +50,7 @@ public class TestIcebergConfig
                 .setDynamicFilteringWaitTimeout(new Duration(0, MINUTES))
                 .setTableStatisticsEnabled(true)
                 .setExtendedStatisticsEnabled(true)
+                .setCollectExtendedStatisticsOnWrite(true)
                 .setProjectionPushdownEnabled(true)
                 .setHiveCatalogName(null)
                 .setFormatVersion(2)
@@ -67,7 +68,7 @@ public class TestIcebergConfig
     public void testExplicitPropertyMappings()
     {
         Map<String, String> properties = ImmutableMap.<String, String>builder()
-                .put("iceberg.file-format", "Parquet")
+                .put("iceberg.file-format", "ORC")
                 .put("iceberg.compression-codec", "NONE")
                 .put("iceberg.use-file-size-from-metadata", "false")
                 .put("iceberg.max-partitions-per-writer", "222")
@@ -76,6 +77,7 @@ public class TestIcebergConfig
                 .put("iceberg.dynamic-filtering.wait-timeout", "1h")
                 .put("iceberg.table-statistics-enabled", "false")
                 .put("iceberg.extended-statistics.enabled", "false")
+                .put("iceberg.extended-statistics.collect-on-write", "false")
                 .put("iceberg.projection-pushdown-enabled", "false")
                 .put("iceberg.hive-catalog-name", "hive")
                 .put("iceberg.format-version", "1")
@@ -90,7 +92,7 @@ public class TestIcebergConfig
                 .buildOrThrow();
 
         IcebergConfig expected = new IcebergConfig()
-                .setFileFormat(PARQUET)
+                .setFileFormat(ORC)
                 .setCompressionCodec(HiveCompressionCodec.NONE)
                 .setUseFileSizeFromMetadata(false)
                 .setMaxPartitionsPerWriter(222)
@@ -99,6 +101,7 @@ public class TestIcebergConfig
                 .setDynamicFilteringWaitTimeout(Duration.valueOf("1h"))
                 .setTableStatisticsEnabled(false)
                 .setExtendedStatisticsEnabled(false)
+                .setCollectExtendedStatisticsOnWrite(false)
                 .setProjectionPushdownEnabled(false)
                 .setHiveCatalogName("hive")
                 .setFormatVersion(1)

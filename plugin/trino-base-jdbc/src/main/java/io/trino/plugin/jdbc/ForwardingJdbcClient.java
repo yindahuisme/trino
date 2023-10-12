@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.jdbc;
 
+import io.trino.plugin.jdbc.JdbcProcedureHandle.ProcedureQuery;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -29,6 +31,7 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.Type;
 
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -36,6 +39,7 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -91,6 +95,12 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public JdbcProcedureHandle getProcedureHandle(ConnectorSession session, ProcedureQuery procedureQuery)
+    {
+        return delegate().getProcedureHandle(session, procedureQuery);
+    }
+
+    @Override
     public List<JdbcColumnHandle> getColumns(ConnectorSession session, JdbcTableHandle tableHandle)
     {
         return delegate().getColumns(session, tableHandle);
@@ -115,6 +125,12 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public Optional<Type> getSupportedType(ConnectorSession session, Type type)
+    {
+        return delegate().getSupportedType(session, type);
+    }
+
+    @Override
     public boolean supportsAggregationPushdown(ConnectorSession session, JdbcTableHandle table, List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments, List<List<ColumnHandle>> groupingSets)
     {
         return delegate().supportsAggregationPushdown(session, table, aggregates, assignments, groupingSets);
@@ -127,7 +143,7 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public Optional<String> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
     {
         return delegate().convertPredicate(session, expression, assignments);
     }
@@ -139,10 +155,23 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public ConnectorSplitSource getSplits(ConnectorSession session, JdbcProcedureHandle procedureHandle)
+    {
+        return delegate().getSplits(session, procedureHandle);
+    }
+
+    @Override
     public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException
     {
         return delegate().getConnection(session, split, tableHandle);
+    }
+
+    @Override
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcProcedureHandle procedureHandle)
+            throws SQLException
+    {
+        return delegate().getConnection(session, split, procedureHandle);
     }
 
     @Override
@@ -158,7 +187,7 @@ public abstract class ForwardingJdbcClient
             JdbcTableHandle table,
             Optional<List<List<JdbcColumnHandle>>> groupingSets,
             List<JdbcColumnHandle> columns,
-            Map<String, String> columnExpressions)
+            Map<String, ParameterizedExpression> columnExpressions)
     {
         return delegate().prepareQuery(session, table, groupingSets, columns, columnExpressions);
     }
@@ -168,6 +197,13 @@ public abstract class ForwardingJdbcClient
             throws SQLException
     {
         return delegate().buildSql(session, connection, split, tableHandle, columnHandles);
+    }
+
+    @Override
+    public CallableStatement buildProcedure(ConnectorSession session, Connection connection, JdbcSplit split, JdbcProcedureHandle procedureHandle)
+            throws SQLException
+    {
+        return delegate().buildProcedure(session, connection, split, procedureHandle);
     }
 
     @Override
@@ -240,10 +276,10 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public PreparedStatement getPreparedStatement(Connection connection, String sql)
+    public PreparedStatement getPreparedStatement(Connection connection, String sql, Optional<Integer> columnCount)
             throws SQLException
     {
-        return delegate().getPreparedStatement(connection, sql);
+        return delegate().getPreparedStatement(connection, sql, columnCount);
     }
 
     @Override
@@ -350,9 +386,9 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public void dropSchema(ConnectorSession session, String schemaName)
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
-        delegate().dropSchema(session, schemaName);
+        delegate().dropSchema(session, schemaName, cascade);
     }
 
     @Override
@@ -398,8 +434,20 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public OptionalLong update(ConnectorSession session, JdbcTableHandle handle)
+    {
+        return delegate().update(session, handle);
+    }
+
+    @Override
     public void truncateTable(ConnectorSession session, JdbcTableHandle handle)
     {
         delegate().truncateTable(session, handle);
+    }
+
+    @Override
+    public OptionalInt getMaxWriteParallelism(ConnectorSession session)
+    {
+        return delegate().getMaxWriteParallelism(session);
     }
 }

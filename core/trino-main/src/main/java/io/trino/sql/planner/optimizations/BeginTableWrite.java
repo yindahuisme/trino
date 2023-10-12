@@ -16,6 +16,7 @@ package io.trino.sql.planner.optimizations;
 import io.trino.Session;
 import io.trino.cost.StatsAndCosts;
 import io.trino.cost.TableStatsProvider;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.FunctionManager;
 import io.trino.metadata.MergeHandle;
@@ -76,7 +77,15 @@ public class BeginTableWrite
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector, TableStatsProvider tableStatsProvider)
+    public PlanNode optimize(
+            PlanNode plan,
+            Session session,
+            TypeProvider types,
+            SymbolAllocator symbolAllocator,
+            PlanNodeIdAllocator idAllocator,
+            WarningCollector warningCollector,
+            PlanOptimizersStatsCollector planOptimizersStatsCollector,
+            TableStatsProvider tableStatsProvider)
     {
         try {
             return SimplePlanRewriter.rewriteWith(new Rewriter(session), plan, Optional.empty());
@@ -120,7 +129,6 @@ public class BeginTableWrite
                     node.getColumns(),
                     node.getColumnNames(),
                     node.getPartitioningScheme(),
-                    node.getPreferredPartitioningScheme(),
                     node.getStatisticsAggregation(),
                     node.getStatisticsAggregationDescriptor());
         }
@@ -137,8 +145,7 @@ public class BeginTableWrite
                     node.getFragmentSymbol(),
                     node.getColumns(),
                     node.getColumnNames(),
-                    node.getPartitioningScheme(),
-                    node.getPreferredPartitioningScheme());
+                    node.getPartitioningScheme());
         }
 
         @Override
@@ -202,7 +209,7 @@ public class BeginTableWrite
                         target.getExecuteHandle(),
                         findTableScanHandleForTableExecute(((TableExecuteNode) node).getSource()),
                         target.getSchemaTableName(),
-                        target.isReportingWrittenBytesSupported());
+                        target.getWriterScalingOptions());
             }
 
             if (node instanceof MergeWriterNode mergeWriterNode) {
@@ -237,15 +244,17 @@ public class BeginTableWrite
                 return new CreateTarget(
                         metadata.beginCreateTable(session, create.getCatalog(), create.getTableMetadata(), create.getLayout()),
                         create.getTableMetadata().getTable(),
-                        target.supportsReportingWrittenBytes(metadata, session),
-                        target.supportsMultipleWritersPerPartition(metadata, session));
+                        target.supportsMultipleWritersPerPartition(metadata, session),
+                        target.getMaxWriterTasks(metadata, session),
+                        target.getWriterScalingOptions(metadata, session));
             }
             if (target instanceof InsertReference insert) {
                 return new InsertTarget(
                         metadata.beginInsert(session, insert.getHandle(), insert.getColumns()),
-                        metadata.getTableMetadata(session, insert.getHandle()).getTable(),
-                        target.supportsReportingWrittenBytes(metadata, session),
-                        target.supportsMultipleWritersPerPartition(metadata, session));
+                        metadata.getTableName(session, insert.getHandle()).getSchemaTableName(),
+                        target.supportsMultipleWritersPerPartition(metadata, session),
+                        target.getMaxWriterTasks(metadata, session),
+                        target.getWriterScalingOptions(metadata, session));
             }
             if (target instanceof MergeTarget merge) {
                 MergeHandle mergeHandle = metadata.beginMerge(session, merge.getHandle());
@@ -259,12 +268,13 @@ public class BeginTableWrite
                 return new TableWriterNode.RefreshMaterializedViewTarget(
                         refreshMV.getStorageTableHandle(),
                         metadata.beginRefreshMaterializedView(session, refreshMV.getStorageTableHandle(), refreshMV.getSourceTableHandles()),
-                        metadata.getTableMetadata(session, refreshMV.getStorageTableHandle()).getTable(),
-                        refreshMV.getSourceTableHandles());
+                        metadata.getTableName(session, refreshMV.getStorageTableHandle()).getSchemaTableName(),
+                        refreshMV.getSourceTableHandles(),
+                        refreshMV.getWriterScalingOptions(metadata, session));
             }
             if (target instanceof TableExecuteTarget tableExecute) {
                 BeginTableExecuteResult<TableExecuteHandle, TableHandle> result = metadata.beginTableExecute(session, tableExecute.getExecuteHandle(), tableExecute.getMandatorySourceHandle());
-                return new TableExecuteTarget(result.getTableExecuteHandle(), Optional.of(result.getSourceHandle()), tableExecute.getSchemaTableName(), tableExecute.isReportingWrittenBytesSupported());
+                return new TableExecuteTarget(result.getTableExecuteHandle(), Optional.of(result.getSourceHandle()), tableExecute.getSchemaTableName(), tableExecute.getWriterScalingOptions());
             }
             throw new IllegalArgumentException("Unhandled target type: " + target.getClass().getSimpleName());
         }

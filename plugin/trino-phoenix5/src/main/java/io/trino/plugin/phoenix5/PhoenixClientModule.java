@@ -19,11 +19,13 @@ import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.opentelemetry.api.OpenTelemetry;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
-import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorRecordSetProvider;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
 import io.trino.plugin.base.classloader.ForClassLoaderSafe;
+import io.trino.plugin.base.mapping.IdentifierMappingModule;
 import io.trino.plugin.jdbc.ConfiguringConnectionFactory;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.DecimalModule;
@@ -41,8 +43,6 @@ import io.trino.plugin.jdbc.JdbcDynamicFilteringSessionProperties;
 import io.trino.plugin.jdbc.JdbcDynamicFilteringSplitManager;
 import io.trino.plugin.jdbc.JdbcMetadataConfig;
 import io.trino.plugin.jdbc.JdbcMetadataSessionProperties;
-import io.trino.plugin.jdbc.JdbcPageSinkProvider;
-import io.trino.plugin.jdbc.JdbcRecordSetProvider;
 import io.trino.plugin.jdbc.JdbcWriteConfig;
 import io.trino.plugin.jdbc.JdbcWriteSessionProperties;
 import io.trino.plugin.jdbc.LazyConnectionFactory;
@@ -54,18 +54,16 @@ import io.trino.plugin.jdbc.TypeHandlingJdbcConfig;
 import io.trino.plugin.jdbc.TypeHandlingJdbcSessionProperties;
 import io.trino.plugin.jdbc.credential.EmptyCredentialProvider;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifierModule;
-import io.trino.plugin.jdbc.mapping.IdentifierMappingModule;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
-import io.trino.spi.connector.ConnectorRecordSetProvider;
+import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
+import jakarta.annotation.PreDestroy;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.phoenix.jdbc.PhoenixDriver;
 import org.apache.phoenix.jdbc.PhoenixEmbeddedDriver;
-
-import javax.annotation.PreDestroy;
 
 import java.sql.SQLException;
 import java.util.Map;
@@ -102,10 +100,11 @@ public class PhoenixClientModule
         binder.bind(ConnectorSplitManager.class).annotatedWith(ForJdbcDynamicFiltering.class).to(PhoenixSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorSplitManager.class).annotatedWith(ForClassLoaderSafe.class).to(JdbcDynamicFilteringSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorSplitManager.class).to(ClassLoaderSafeConnectorSplitManager.class).in(Scopes.SINGLETON);
-        binder.bind(ConnectorRecordSetProvider.class).annotatedWith(ForClassLoaderSafe.class).to(JdbcRecordSetProvider.class).in(Scopes.SINGLETON);
-        binder.bind(ConnectorRecordSetProvider.class).to(ClassLoaderSafeConnectorRecordSetProvider.class).in(Scopes.SINGLETON);
-        binder.bind(ConnectorPageSinkProvider.class).annotatedWith(ForClassLoaderSafe.class).to(JdbcPageSinkProvider.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectorPageSinkProvider.class).annotatedWith(ForClassLoaderSafe.class).to(PhoenixPageSinkProvider.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorPageSinkProvider.class).to(ClassLoaderSafeConnectorPageSinkProvider.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectorPageSourceProvider.class).annotatedWith(ForClassLoaderSafe.class).to(PhoenixPageSourceProvider.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectorPageSourceProvider.class).to(ClassLoaderSafeConnectorPageSourceProvider.class).in(Scopes.SINGLETON);
+
         binder.bind(QueryBuilder.class).to(DefaultQueryBuilder.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, Key.get(int.class, MaxDomainCompactionThreshold.class));
         configBinder(binder).bindConfigDefaults(JdbcMetadataConfig.class, config -> config.setDomainCompactionThreshold(DEFAULT_DOMAIN_COMPACTION_THRESHOLD));
@@ -167,7 +166,7 @@ public class PhoenixClientModule
     @Provides
     @Singleton
     @ForBaseJdbc
-    public ConnectionFactory getConnectionFactory(PhoenixConfig config)
+    public ConnectionFactory getConnectionFactory(PhoenixConfig config, OpenTelemetry openTelemetry)
             throws SQLException
     {
         return new ConfiguringConnectionFactory(
@@ -175,7 +174,8 @@ public class PhoenixClientModule
                         PhoenixDriver.INSTANCE, // Note: for some reason new PhoenixDriver won't work.
                         config.getConnectionUrl(),
                         getConnectionProperties(config),
-                        new EmptyCredentialProvider()),
+                        new EmptyCredentialProvider(),
+                        openTelemetry),
                 connection -> {
                     // Per JDBC spec, a Driver is expected to have new connections in auto-commit mode.
                     // This seems not to be true for PhoenixDriver, so we need to be explicit here.
